@@ -1,0 +1,34 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build output
+build/
+Objects/
+Listings/
+*.o
+*.d
+*.axf
+*.elf
+*.hex
+*.map
+*.lst
+*.crf
+*.htm
+*.lnp
+*.sct.bak
+*.build_log.htm
+
+# Keil and debugger local state
+*.uvguix.*
+JLinkLog.txt
+JLinkSettings.ini
+
+# Editor and operating system temporary files
+*.tmp
+*.bak
+~$*
+Thumbs.db
+.DS_Store
