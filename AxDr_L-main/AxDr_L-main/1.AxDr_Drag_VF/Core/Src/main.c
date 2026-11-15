@@ -31,6 +31,7 @@
 /* USER CODE BEGIN Includes */
 #include "common.h"
 #include "modlue.h"
+#include "sensor_diag.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -97,33 +98,10 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
-  MX_TIM1_Init();
-  MX_TIM3_Init();
-  MX_USB_Device_Init();
-  MX_ADC1_Init();
-  MX_ADC2_Init();
   MX_USART3_UART_Init();
-  MX_FDCAN1_Init();
-  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(1000);
-
-  HAL_TIM_Base_Start(&htim3);
-  // HAL_TIM_Base_Start_IT(&htim1);
-
-  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
-  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
-  HAL_ADCEx_InjectedStart_IT(&hadc1);
-  HAL_ADCEx_InjectedStart(&hadc2);
-
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc1_buff, 2);
-  HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc2_buff, 4);
-
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 3900);
-
-  pmsm_init();
-  foc_pwm_start();
+  /* No timers, ADC triggers, FOC, USB (PA12 conflict), or SPI3 (UART conflict). */
+  sensor_diag_init();
   
   /* USER CODE END 2 */
 
@@ -134,6 +112,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    sensor_diag_poll();
   }
   /* USER CODE END 3 */
 }
@@ -197,6 +176,8 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  MX_GPIO_Init();
+  HAL_GPIO_WritePin(LED_FAULT_GPIO_Port, LED_FAULT_Pin, GPIO_PIN_SET);
   while (1)
   {
   }

@@ -1,121 +1,42 @@
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    gpio.c
-  * @brief   This file provides code for the configuration
-  *          of all used GPIO pins.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
-/* USER CODE END Header */
-
-/* Includes ------------------------------------------------------------------*/
+/* Step 1 board setup. Bridge pins are GPIO outputs, never timer outputs. */
 #include "gpio.h"
 
-/* USER CODE BEGIN 0 */
-
-/* USER CODE END 0 */
-
-/*----------------------------------------------------------------------------*/
-/* Configure GPIO                                                             */
-/*----------------------------------------------------------------------------*/
-/* USER CODE BEGIN 1 */
-
-/* USER CODE END 1 */
-
-/** Configure pins as
-        * Analog
-        * Input
-        * Output
-        * EVENT_OUT
-        * EXTI
-*/
 void MX_GPIO_Init(void)
 {
-
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOF_CLK_ENABLE();
+  GPIO_InitTypeDef io = {0};
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(R_EN_GPIO_Port, R_EN_Pin, GPIO_PIN_RESET);
+  /* Set all twelve active-high bridge input latches LOW before output mode. */
+  HAL_GPIO_WritePin(GPIOA, BRIDGE_A_PINS|LED_FAULT_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, BRIDGE_B_PINS, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, BRIDGE_C_PINS, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_RUN_GPIO_Port, LED_RUN_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(SPI1_CSN_GPIO_Port, SPI1_CSN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(ENC2_CS_GPIO_Port, ENC2_CS_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, LCD_RES_Pin|LCD_DC_Pin, GPIO_PIN_SET);
+  io.Mode = GPIO_MODE_OUTPUT_PP;
+  io.Pull = GPIO_PULLDOWN;
+  io.Speed = GPIO_SPEED_FREQ_LOW;
+  io.Pin = BRIDGE_A_PINS;
+  HAL_GPIO_Init(GPIOA, &io);
+  io.Pin = BRIDGE_B_PINS;
+  HAL_GPIO_Init(GPIOB, &io);
+  io.Pin = BRIDGE_C_PINS;
+  HAL_GPIO_Init(GPIOC, &io);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SPI3_CS_GPIO_Port, SPI3_CS_Pin, GPIO_PIN_RESET);
+  io.Pull = GPIO_NOPULL;
+  io.Pin = LED_RUN_Pin;
+  HAL_GPIO_Init(LED_RUN_GPIO_Port, &io);
+  io.Pin = LED_FAULT_Pin;
+  HAL_GPIO_Init(LED_FAULT_GPIO_Port, &io);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SPI1_CSN_GPIO_Port, SPI1_CSN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LCD_CS_Pin|LCD_BLK_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : R_EN_Pin */
-  GPIO_InitStruct.Pin = R_EN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(R_EN_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LCD_RES_Pin */
-  GPIO_InitStruct.Pin = LCD_RES_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LCD_RES_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LCD_DC_Pin */
-  GPIO_InitStruct.Pin = LCD_DC_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LCD_DC_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PC6 PC7 PC8 PC9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : SPI3_CS_Pin */
-  GPIO_InitStruct.Pin = SPI3_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SPI3_CS_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : SPI1_CSN_Pin */
-  GPIO_InitStruct.Pin = SPI1_CSN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SPI1_CSN_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LCD_CS_Pin LCD_BLK_Pin */
-  GPIO_InitStruct.Pin = LCD_CS_Pin|LCD_BLK_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
+  io.Pull = GPIO_PULLUP;
+  io.Pin = SPI1_CSN_Pin;
+  HAL_GPIO_Init(SPI1_CSN_GPIO_Port, &io);
+  io.Pin = ENC2_CS_Pin;
+  HAL_GPIO_Init(ENC2_CS_GPIO_Port, &io);
 }
-
-/* USER CODE BEGIN 2 */
-
-/* USER CODE END 2 */

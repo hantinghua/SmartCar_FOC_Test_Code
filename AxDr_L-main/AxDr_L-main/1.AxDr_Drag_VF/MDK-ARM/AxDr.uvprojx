@@ -10,14 +10,14 @@
       <TargetName>AxDr</TargetName>
       <ToolsetNumber>0x4</ToolsetNumber>
       <ToolsetName>ARM-ADS</ToolsetName>
-      <pCCUsed>6180000::V6.18::ARMCLANG</pCCUsed>
+      <pCCUsed>6240000::V6.24::ARMCLANG</pCCUsed>
       <uAC6>1</uAC6>
       <TargetOption>
         <TargetCommonOption>
-          <Device>STM32G474RETx</Device>
+          <Device>STM32G474VETx</Device>
           <Vendor>STMicroelectronics</Vendor>
-          <PackID>Keil.STM32G4xx_DFP.1.4.0</PackID>
-          <PackURL>http://www.keil.com/pack/</PackURL>
+          <PackID>Keil.STM32G4xx_DFP.2.2.0</PackID>
+          <PackURL>https://www.keil.com/pack/</PackURL>
           <Cpu>IRAM(0x20000000-0x2001FFFF) IROM(0x8000000-0x807FFFF) CLOCK(8000000) FPU2 CPUTYPE("Cortex-M4") TZ</Cpu>
           <FlashUtilSpec></FlashUtilSpec>
           <StartupFile></StartupFile>
@@ -33,7 +33,7 @@
           <SLE66CMisc></SLE66CMisc>
           <SLE66AMisc></SLE66AMisc>
           <SLE66LinkerMisc></SLE66LinkerMisc>
-          <SFDFile>$$Device:STM32G474RETx$CMSIS\SVD\STM32G474xx.svd</SFDFile>
+          <SFDFile>$$Device:STM32G474VETx$CMSIS\SVD\STM32G474xx.svd</SFDFile>
           <bCustSvd>0</bCustSvd>
           <UseEnv>0</UseEnv>
           <BinPath></BinPath>
@@ -48,8 +48,8 @@
             <NotGenerated>0</NotGenerated>
             <InvalidFlash>1</InvalidFlash>
           </TargetStatus>
-          <OutputDirectory>AxDr\</OutputDirectory>
-          <OutputName>AxDr</OutputName>
+          <OutputDirectory>build\step1\</OutputDirectory>
+          <OutputName>AxDr_step1</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
           <CreateHexFile>1</CreateHexFile>
@@ -81,7 +81,7 @@
           </BeforeMake>
           <AfterMake>
             <RunUserProg1>0</RunUserProg1>
-            <RunUserProg2>1</RunUserProg2>
+            <RunUserProg2>0</RunUserProg2>
             <UserProg1Name></UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
@@ -398,6 +398,11 @@
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/main.c</FilePath>
+            </File>
+            <File>
+              <FileName>sensor_diag.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sensor_diag.c</FilePath>
             </File>
             <File>
               <FileName>gpio.c</FileName>

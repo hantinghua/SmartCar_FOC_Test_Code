@@ -73,14 +73,24 @@ void Error_Handler(void);
 #define LCD_DC_GPIO_Port GPIOC
 #define SPI3_CS_Pin GPIO_PIN_15
 #define SPI3_CS_GPIO_Port GPIOA
-#define SPI1_CSN_Pin GPIO_PIN_2
-#define SPI1_CSN_GPIO_Port GPIOD
+#define SPI1_CSN_Pin GPIO_PIN_15
+#define SPI1_CSN_GPIO_Port GPIOA
 #define LCD_CS_Pin GPIO_PIN_6
 #define LCD_CS_GPIO_Port GPIOB
 #define LCD_BLK_Pin GPIO_PIN_7
 #define LCD_BLK_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+#define ENC2_CS_Pin GPIO_PIN_11
+#define ENC2_CS_GPIO_Port GPIOE
+#define LED_RUN_Pin GPIO_PIN_2
+#define LED_RUN_GPIO_Port GPIOD
+#define LED_FAULT_Pin GPIO_PIN_12
+#define LED_FAULT_GPIO_Port GPIOA
+/* Actual board: all twelve active-high bridge inputs stay GPIO-low in step 1. */
+#define BRIDGE_A_PINS (GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11)
+#define BRIDGE_B_PINS (GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15)
+#define BRIDGE_C_PINS (GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9)
 
 /* USER CODE END Private defines */
 
