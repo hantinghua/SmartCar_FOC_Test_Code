@@ -31,10 +31,6 @@
 /* USER CODE BEGIN Includes */
 #include "common.h"
 #include "modlue.h"
-#include "hrtim_pwm.h"
-#include "encoder.h"
-#include "alignment_port.h"
-#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -68,7 +64,6 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 uint16_t adc1_buff[2];
 uint16_t adc2_buff[4];
-
 /* USER CODE END 0 */
 
 /**
@@ -102,47 +97,43 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
-  MX_SPI4_Init();
+  MX_TIM1_Init();
+  MX_TIM3_Init();
+  MX_USB_Device_Init();
   MX_ADC1_Init();
   MX_ADC2_Init();
   MX_USART3_UART_Init();
+  MX_FDCAN1_Init();
+  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
-  /* DWT provides a bounded SPI timeout even inside the ADC interrupt. */
-  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-  DWT->CYCCNT = 0u;
-  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-  uint32_t hw_ok = 1u;
-  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK) hw_ok = 0u;
-  if (HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED) != HAL_OK) hw_ok = 0u;
-  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc1_buff, 1u) != HAL_OK) hw_ok = 0u;
-  /* Continuous bus ADC / one-element circular DMA: do not interrupt for EACH
-     sample. The latest value is read directly by telemetry. */
-  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
-  if (hrtim_pwm_init() != 0u) hw_ok = 0u;
-  alignment_port_init(hw_ok != 0u);
-  if (hw_ok != 0u) {
-    /* Start master ADC timing WITHOUT enabling any bridge outputs. */
-    hrtim_pwm_adc_trigger_init(400u);
-    if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK ||
-        HAL_ADCEx_InjectedStart(&hadc2) != HAL_OK) {
-      alignment_port_init(0);
-    }
-  }
-  alignment_link_init();
+  HAL_Delay(1000);
+
+  HAL_TIM_Base_Start(&htim3);
+  // HAL_TIM_Base_Start_IT(&htim1);
+
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
+  HAL_ADCEx_InjectedStart_IT(&hadc1);
+  HAL_ADCEx_InjectedStart(&hadc2);
+
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc1_buff, 2);
+  HAL_ADC_Start_DMA(&hadc2, (uint32_t *)adc2_buff, 4);
+
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 3900);
+
+  pmsm_init();
+  foc_pwm_start();
+  
   /* USER CODE END 2 */
+
+  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  uint32_t led_tick = 0u;
-  while (1) {
+  while (1)
+  {
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
-    alignment_link_poll();
-    alignment_port_poll();
-    if (HAL_GetTick() - led_tick >= 500u) {
-      led_tick = HAL_GetTick();
-      HAL_GPIO_TogglePin(LED_RUN_GPIO_Port, LED_RUN_Pin);
-    }
-    HAL_GPIO_WritePin(LED_FAULT_GPIO_Port, LED_FAULT_Pin,
-        g_alignment.fault != ALIGN_OK ? GPIO_PIN_SET : GPIO_PIN_RESET);
   }
   /* USER CODE END 3 */
 }

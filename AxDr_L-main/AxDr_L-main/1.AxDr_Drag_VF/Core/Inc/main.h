@@ -65,28 +65,20 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-/* ============================ 本板引脚定义 ============================ */
-/* 磁编码器 CS（外部 10k 上拉，空闲为高）                                    */
-#define ENC1_CS_Pin GPIO_PIN_15
-#define ENC1_CS_GPIO_Port GPIOA          /* PA15 : MENC15A #1 片选 */
-#define ENC2_CS_Pin GPIO_PIN_11
-#define ENC2_CS_GPIO_Port GPIOE          /* PE11 : MENC15A #2 片选 */
-
-/* 指示灯                                                                     */
-#define LED_FAULT_Pin GPIO_PIN_12
-#define LED_FAULT_GPIO_Port GPIOA        /* PA12 : 故障灯 */
-#define LED_RUN_Pin GPIO_PIN_2
-#define LED_RUN_GPIO_Port GPIOD          /* PD2  : 运行灯 */
-
-/* 按键（外部 10k 上拉，按下为低）                                            */
-#define KEY_Pin GPIO_PIN_0
-#define KEY_GPIO_Port GPIOC              /* PC0  : 按键 */
-
-/* ---- PWM：HRTIM1 12 路（AF13），两路电机各 3 个半桥 ---------------------- */
-/*  电机1：TA = PA8/PA9   TB = PA10/PA11   TC = PB12/PB13                    */
-/*  电机2：TD = PB14/PB15  TF = PC6/PC7     TE = PC8/PC9                      */
-/*  电流采样：ADC1 注入 PA0(IN1)/PA1(IN2)；ADC2 注入 PA4(IN17)/PA5(IN13)      */
-/*  母线电压：ADC1 规则组 PB11(IN14)                                          */
+#define R_EN_Pin GPIO_PIN_13
+#define R_EN_GPIO_Port GPIOC
+#define LCD_RES_Pin GPIO_PIN_14
+#define LCD_RES_GPIO_Port GPIOC
+#define LCD_DC_Pin GPIO_PIN_15
+#define LCD_DC_GPIO_Port GPIOC
+#define SPI3_CS_Pin GPIO_PIN_15
+#define SPI3_CS_GPIO_Port GPIOA
+#define SPI1_CSN_Pin GPIO_PIN_2
+#define SPI1_CSN_GPIO_Port GPIOD
+#define LCD_CS_Pin GPIO_PIN_6
+#define LCD_CS_GPIO_Port GPIOB
+#define LCD_BLK_Pin GPIO_PIN_7
+#define LCD_BLK_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
