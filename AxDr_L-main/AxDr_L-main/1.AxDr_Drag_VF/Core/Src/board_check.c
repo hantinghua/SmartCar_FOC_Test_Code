@@ -8,6 +8,9 @@
 
 #define ZERO_SAMPLES 256u
 #define VECTOR_MS 100u
+#define SWEEP_MS 400u
+#define SWEEP_RAMP_MS 50u
+#define SWEEP_MOVE_MS 300u
 #define CURRENT_LIMIT_COUNTS 99 /* ~0.8 A: 5 mOhm, gain 20, VDDA 3.3 V */
 static volatile uint16_t raw[2];
 static uint16_t offset[2], minimum[2], maximum[2];
@@ -19,9 +22,106 @@ static volatile uint32_t adc_tick, vector_samples, peak_counts;
 static volatile uint32_t diag_irq_entries, diag_irq_jeos;
 static uint32_t vector_start, next_allowed, encoder_tick, encoder_angle, angle_start;
 static uint8_t encoder_valid;
-static volatile uint8_t vector_direction; /* 0: alpha, 1: beta (+90 electrical deg) */
+static volatile uint8_t vector_direction; /* 0: alpha, 1: beta, 2: forward 0->90, 3: reverse 90->0 */
 static volatile uint8_t active_pair, expired;
 static volatile uint32_t deadline;
+
+/* Phase duty offsets in timer ticks. Offline-generated alpha/beta rotation,
+ * normalised so max phase-to-phase spread never exceeds 120/8000 (1.5%).
+ * Integer-degree lookup keeps trigonometry out of the 20 kHz ADC IRQ. */
+static const int16_t sweep_phase[91][3] = {
+  {80, -40, -40},
+  {79, -38, -40},
+  {78, -36, -41},
+  {77, -35, -42},
+  {76, -33, -43},
+  {76, -32, -43},
+  {75, -30, -44},
+  {74, -29, -45},
+  {73, -27, -46},
+  {73, -26, -46},
+  {72, -25, -47},
+  {71, -23, -48},
+  {71, -22, -48},
+  {70, -21, -49},
+  {69, -19, -50},
+  {69, -18, -50},
+  {68, -17, -51},
+  {67, -15, -52},
+  {67, -14, -52},
+  {66, -13, -53},
+  {66, -12, -53},
+  {65, -10, -54},
+  {64, -9, -55},
+  {64, -8, -55},
+  {63, -7, -56},
+  {63, -6, -56},
+  {62, -4, -57},
+  {61, -3, -58},
+  {61, -2, -58},
+  {60, -1, -59},
+  {60, 0, -60},
+  {59, 1, -60},
+  {58, 2, -61},
+  {58, 3, -61},
+  {57, 4, -62},
+  {56, 6, -63},
+  {56, 7, -63},
+  {55, 8, -64},
+  {55, 9, -64},
+  {54, 10, -65},
+  {53, 12, -66},
+  {53, 13, -66},
+  {52, 14, -67},
+  {52, 15, -67},
+  {51, 17, -68},
+  {50, 18, -69},
+  {50, 19, -69},
+  {49, 21, -70},
+  {48, 22, -71},
+  {48, 23, -71},
+  {47, 25, -72},
+  {46, 26, -73},
+  {46, 27, -73},
+  {45, 29, -74},
+  {44, 30, -75},
+  {43, 32, -76},
+  {43, 33, -76},
+  {42, 35, -77},
+  {41, 36, -78},
+  {40, 38, -79},
+  {40, 39, -80},
+  {38, 40, -79},
+  {36, 41, -78},
+  {35, 42, -77},
+  {33, 43, -76},
+  {32, 43, -76},
+  {30, 44, -75},
+  {29, 45, -74},
+  {27, 46, -73},
+  {26, 46, -73},
+  {25, 47, -72},
+  {23, 48, -71},
+  {22, 48, -71},
+  {21, 49, -70},
+  {19, 50, -69},
+  {18, 50, -69},
+  {17, 51, -68},
+  {15, 52, -67},
+  {14, 52, -67},
+  {13, 53, -66},
+  {12, 53, -66},
+  {10, 54, -65},
+  {9, 55, -64},
+  {8, 55, -64},
+  {7, 56, -63},
+  {6, 56, -63},
+  {4, 57, -62},
+  {3, 58, -61},
+  {2, 58, -61},
+  {1, 59, -60},
+  {0, 60, -60}
+};
 
 static void send_text(const char *s)
 {
@@ -118,6 +218,16 @@ void board_check_adc_irq(void)
     HRTIM1->sTimerxRegs[0].CMP1xR = 4000u - delta;
     HRTIM1->sTimerxRegs[1].CMP1xR = 4000u + delta / 2u;
     HRTIM1->sTimerxRegs[2].CMP1xR = 4000u + delta / 2u;
+  } else if (vector_direction >= 2u) {
+    uint32_t degree = elapsed <= SWEEP_RAMP_MS ? 0u :
+        (elapsed-SWEEP_RAMP_MS) * 90u / SWEEP_MOVE_MS;
+    if (degree > 90u) degree = 90u;
+    if (vector_direction == 3u) degree = 90u - degree;
+    uint32_t ramp = elapsed < SWEEP_RAMP_MS ? elapsed : SWEEP_RAMP_MS;
+    for (uint32_t phase = 0u; phase < 3u; phase++) {
+      int32_t ticks = (int32_t)sweep_phase[degree][phase] * (int32_t)ramp / (int32_t)SWEEP_RAMP_MS;
+      HRTIM1->sTimerxRegs[phase].CMP1xR = (uint32_t)(4000 - ticks);
+    }
   } else {
     /* Pure beta: A=0, B=+3/4 delta, C=-3/4 delta.
      * Same 120-tick max line difference as a; vector magnitude is sqrt(3)/2
@@ -236,15 +346,19 @@ static void start_vector(uint8_t direction)
   vector_samples = peak_counts = 0u;
   angle_start = encoder_angle;
   vector_start = adc_tick = HAL_GetTick();
-  deadline = vector_start + VECTOR_MS;
-  next_allowed = vector_start + VECTOR_MS + 2000u;
+  uint32_t duration = direction >= 2u ? SWEEP_MS : VECTOR_MS;
+  deadline = vector_start + duration;
+  next_allowed = vector_start + duration + 2000u;
   active_pair = 4u;
   HRTIM1->sCommonRegs.OENR = 0x3Fu;
   __set_PRIMASK(primask);
   char line[192];
   (void)snprintf(line, sizeof(line),
-      "# VECTOR_BEGIN R6 dir=%c e_deg=%u TRG2; 100ms; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
-      direction ? 'b' : 'a', direction ? 90u : 0u);
+      "# VECTOR_BEGIN R8 dir=%c e_start=%u e_end=%u TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
+      direction == 3u ? 'j' : (direction == 2u ? 'g' : (direction ? 'b' : 'a')),
+      (direction == 1u || direction == 3u) ? 90u : 0u,
+      (direction == 1u || direction == 2u) ? 90u : 0u,
+      (unsigned long)duration);
   send_text(line);
 }
 
@@ -259,7 +373,7 @@ static void diagnose_sync(void)
     return;
   }
   stop_pwm();
-  send_text("# DIAG_BEGIN R6 PWM_OFF; route=TA_CMP2->HRTIM_TRG2->ADC1; stages=POLL,IRQ,SW\r\n");
+  send_text("# DIAG_BEGIN R8 PWM_OFF; route=TA_CMP2->HRTIM_TRG2->ADC1; stages=POLL,IRQ,SW\r\n");
   if (!configure_timer()) {
     stop_pwm(); send_text("# DIAG_FAIL DLL_TIMEOUT PWM_OFF\r\n"); return;
   }
@@ -357,10 +471,10 @@ void board_check_init(void)
   MX_ADC1_Init();
   adc_ready = HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) == HAL_OK;
   if (adc_ready == 0u) check_fault = 1u;
-  send_text("# STEP2B_R6 TWO_FIXED_VECTORS_TRG2; PWM OFF at boot\r\n"
+  send_text("# STEP2B_R8 BIDIRECTIONAL_SWEEP_TRG2; PWM OFF at boot\r\n"
             "# PA0/PA1 current ADC; 5mOhm x20; nominal VDDA=3.3V\r\n"
             "# z=zero; f=FireWater; t=text; x=stop; c=clear check_fault\r\n"
-            "# d=PWM-off diagnosis; a=0deg b=90deg fixed vector 100ms; u/v/w disabled; current trip ~0.8A\r\n");
+            "# d=PWM-off diagnosis; a/b=fixed 100ms; g=0to90 j=90to0 sweep 400ms; u/v/w disabled; current trip ~0.8A\r\n");
   start_zero();
 }
 
@@ -375,7 +489,7 @@ void board_check_poll(void)
         reason, (unsigned long)vector_samples, (unsigned long)(peak_counts*33000u/4095u),
         (unsigned long)(angle_start/100u), (unsigned long)(angle_start%100u),
         (unsigned long)(encoder_angle/100u), (unsigned long)(encoder_angle%100u),
-        vector_direction ? 'b' : 'a');
+        vector_direction == 3u ? 'j' : (vector_direction == 2u ? 'g' : (vector_direction ? 'b' : 'a')));
     send_text(line);
   }
   if (active_pair != 0u) return; /* PWM ADC runs independently in its IRQ. */
@@ -418,7 +532,7 @@ void board_check_command(uint8_t command)
   switch (command) {
     case '?':
       send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear-and-zero\r\n"
-                "# d=PWM-off diagnosis; a=0deg b=90deg fixed vector 100ms; 2s cooldown; u/v/w disabled\r\n");
+                "# d=PWM-off diagnosis; a/b=fixed 100ms; g=0to90 j=90to0 sweep 400ms; 2s cooldown; u/v/w disabled\r\n");
       break;
     case 'x': stop_pwm(); send_text("# STOP all bridge inputs low\r\n"); break;
     case 'z': start_zero(); break;
@@ -427,6 +541,8 @@ void board_check_command(uint8_t command)
     case 't': chart_mode = 0u; break;
     case 'a': start_vector(0u); break;
     case 'b': start_vector(1u); break;
+    case 'g': start_vector(2u); break;
+    case 'j': start_vector(3u); break;
     case 'd': diagnose_sync(); break;
     case 'u': case 'v': case 'w': send_text("# DISABLED in STEP2B; a=fixed vector only\r\n"); break;
     case 'c':
