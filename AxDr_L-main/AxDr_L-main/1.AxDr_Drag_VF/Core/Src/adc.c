@@ -30,8 +30,8 @@ DMA_HandleTypeDef hdma_adc1;
 DMA_HandleTypeDef hdma_adc2;
 
 /* ADC1 init function */
-/* Step 2A: software-triggered injected PA0/PA1, polling only.
- * No ADC interrupt, DMA, regular conversion or PWM trigger is started. */
+/* Step 2B: PA0/PA1 injected pair. Software trigger while idle;
+ * board_check selects HRTIM TRG2 + dedicated JEOS IRQ during a pulse. */
 void MX_ADC1_Init(void)
 {
   ADC_MultiModeTypeDef multi = {0};
@@ -52,7 +52,7 @@ void MX_ADC1_Init(void)
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multi) != HAL_OK) Error_Handler();
   injected.InjectedChannel = ADC_CHANNEL_1;
   injected.InjectedRank = ADC_INJECTED_RANK_1;
-  injected.InjectedSamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  injected.InjectedSamplingTime = ADC_SAMPLETIME_47CYCLES_5;
   injected.InjectedSingleDiff = ADC_SINGLE_ENDED;
   injected.InjectedOffsetNumber = ADC_OFFSET_NONE;
   injected.InjectedNbrOfConversion = 2;
@@ -201,7 +201,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-    /* No ADC IRQ: legacy foc_ctrl.c callback must never run in this test. */
+    /* IRQ enabled by board_check only during a pulse; legacy HAL FOC callback bypassed. */
   /* USER CODE BEGIN ADC1_MspInit 1 */
 
   /* USER CODE END ADC1_MspInit 1 */

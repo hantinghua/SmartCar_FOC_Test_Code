@@ -2,6 +2,8 @@
 #define BOARD_CHECK_H
 #include "main.h"
 void board_check_init(void);
+void board_check_adc_irq(void);
+void board_check_encoder(uint32_t angle, uint8_t ok);
 void board_check_poll(void);
 void board_check_tick(void);
 void board_check_command(uint8_t command);
