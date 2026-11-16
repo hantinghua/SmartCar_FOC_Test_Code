@@ -189,12 +189,14 @@ void PendSV_Handler(void)
 /**
   * @brief This function handles System tick timer.
   */
+extern void board_check_tick(void);
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
 
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
+  board_check_tick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
 
   /* USER CODE END SysTick_IRQn 1 */

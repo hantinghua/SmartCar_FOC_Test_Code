@@ -100,7 +100,8 @@ int main(void)
   MX_SPI1_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* No timers, ADC triggers, FOC, USB (PA12 conflict), or SPI3 (UART conflict). */
+  /* Start only encoder/UART and polled zero-current ADC. Scope PWM needs a command.
+   * No FOC, motor motion, USB (PA12 conflict) or SPI3 (UART conflict). */
   sensor_diag_init();
   
   /* USER CODE END 2 */

@@ -3,6 +3,7 @@
 #include "main.h"
 #include "spi.h"
 #include "usart.h"
+#include "board_check.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -32,7 +33,7 @@ static void serial_text(const char *text)
 
 static void print_help(void)
 {
-  serial_text("\r\nSTEP1_ENCODER_UART; HW_SPI; PWM=OFF; ENC1 only\r\n"
+  serial_text("\r\nSTEP2A_ENCODER_CURRENT_SCOPE; HW_SPI; ENC1 only\r\n"
               "USART3 PC10=TX PC11=RX 115200 8N1\r\n"
               "ENC1 PB3=SCK PB4=MISO PB5=MOSI PA15=CS\r\n"
               "ANGLE_BITS=14; raw16 retained; verify ONE wrap per shaft turn\r\n"
@@ -112,7 +113,7 @@ static void sample_encoder(void)
   previous_raw = g_step1_raw;
   have_sample = (raw != 0xFFFFu);
   HAL_GPIO_WritePin(LED_FAULT_GPIO_Port, LED_FAULT_Pin,
-                   raw == 0xFFFFu ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                   raw == 0xFFFFu || board_check_fault() != 0u ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 static void report_encoder(void)
@@ -120,13 +121,13 @@ static void report_encoder(void)
   char line[192];
   if (g_step1_spi_ok == 0u) {
     (void)snprintf(line, sizeof(line),
-        "ms=%lu angle=INVALID SPI_ERROR spi_err=%lu uart_err=%lu PWM=OFF\r\n",
+        "ms=%lu angle=INVALID SPI_ERROR spi_err=%lu uart_err=%lu motor_motion=DISABLED\r\n",
         (unsigned long)HAL_GetTick(), (unsigned long)g_step1_spi_errors,
         (unsigned long)g_step1_uart_errors);
   } else {
     uint32_t centideg = (uint32_t)g_step1_raw * 36000u / ENCODER_COUNTS;
     (void)snprintf(line, sizeof(line),
-        "ms=%lu raw16=0x%04X bits=%u raw=%u deg=%lu.%02lu delta=%ld spi_err=%lu uart_err=%lu%s PWM=OFF\r\n",
+        "ms=%lu raw16=0x%04X bits=%u raw=%u deg=%lu.%02lu delta=%ld spi_err=%lu uart_err=%lu%s motor_motion=DISABLED\r\n",
         (unsigned long)HAL_GetTick(), (unsigned int)g_step1_raw16,
         (unsigned int)SENSOR_DIAG_ENCODER_BITS, (unsigned int)g_step1_raw,
         (unsigned long)(centideg / 100u),
@@ -142,11 +143,16 @@ static void poll_serial(void)
   uint8_t ch;
   if (HAL_UART_Receive(&huart3, &ch, 1u, 0u) == HAL_OK) {
     switch (ch) {
-      case '?': case 'h': print_help(); break;
-      case 'p': stream_enabled = 0u; serial_text("STREAM=PAUSED PWM=OFF\r\n"); break;
-      case 'r': stream_enabled = 1u; serial_text("STREAM=RUNNING PWM=OFF\r\n"); break;
-      case 's': sample_encoder(); report_encoder(); break;
-      default: break;
+      case '?': case 'h': print_help(); board_check_command('?'); break;
+      case 'p': stream_enabled = 0u; serial_text("STREAM=PAUSED motor_motion=DISABLED\r\n"); break;
+      case 'r': stream_enabled = 1u; serial_text("STREAM=RUNNING motor_motion=DISABLED\r\n"); break;
+      case 's':
+        sample_encoder();
+        if (board_check_chart() == 0u) report_encoder();
+        board_check_report((uint32_t)g_step1_raw * 36000u / ENCODER_COUNTS,
+                           g_step1_spi_ok && g_step1_raw16 != 0xFFFFu);
+        break;
+      default: board_check_command(ch); break;
     }
   }
   if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE) != RESET) {
@@ -159,6 +165,7 @@ void sensor_diag_init(void)
 {
   HAL_Delay(100u);
   print_help();
+  board_check_init();
   sample_tick = report_tick = led_tick = HAL_GetTick();
 }
 
@@ -166,13 +173,18 @@ void sensor_diag_poll(void)
 {
   uint32_t now = HAL_GetTick();
   poll_serial();
+  board_check_poll();
   if ((uint32_t)(now - sample_tick) >= 20u) {
     sample_tick = now;
     sample_encoder();
   }
   if ((uint32_t)(now - report_tick) >= 200u) {
     report_tick = now;
-    if (stream_enabled != 0u) report_encoder();
+    if (stream_enabled != 0u) {
+      if (board_check_chart() == 0u) report_encoder();
+      board_check_report((uint32_t)g_step1_raw * 36000u / ENCODER_COUNTS,
+                        g_step1_spi_ok && g_step1_raw16 != 0xFFFFu);
+    }
   }
   if ((uint32_t)(now - led_tick) >= 500u) {
     led_tick = now;

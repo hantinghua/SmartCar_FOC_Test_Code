@@ -48,8 +48,8 @@
             <NotGenerated>0</NotGenerated>
             <InvalidFlash>1</InvalidFlash>
           </TargetStatus>
-          <OutputDirectory>build\step1\</OutputDirectory>
-          <OutputName>AxDr_step1</OutputName>
+          <OutputDirectory>build\step2a\</OutputDirectory>
+          <OutputName>AxDr_step2a</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
           <CreateHexFile>1</CreateHexFile>
@@ -403,6 +403,11 @@
               <FileName>sensor_diag.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/sensor_diag.c</FilePath>
+            </File>
+            <File>
+              <FileName>board_check.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/board_check.c</FilePath>
             </File>
             <File>
               <FileName>gpio.c</FileName>
