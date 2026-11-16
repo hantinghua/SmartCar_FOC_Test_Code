@@ -19,6 +19,7 @@ static volatile uint32_t adc_tick, vector_samples, peak_counts;
 static volatile uint32_t diag_irq_entries, diag_irq_jeos;
 static uint32_t vector_start, next_allowed, encoder_tick, encoder_angle, angle_start;
 static uint8_t encoder_valid;
+static volatile uint8_t vector_direction; /* 0: alpha, 1: beta (+90 electrical deg) */
 static volatile uint8_t active_pair, expired;
 static volatile uint32_t deadline;
 
@@ -113,9 +114,19 @@ void board_check_adc_irq(void)
    * Updates happen after ADC completion, well before CMP1 near 4000. */
   uint32_t elapsed = adc_tick - vector_start;
   uint32_t delta = elapsed < 50u ? elapsed * 80u / 50u : 80u;
-  HRTIM1->sTimerxRegs[0].CMP1xR = 4000u - delta;
-  HRTIM1->sTimerxRegs[1].CMP1xR = 4000u + delta / 2u;
-  HRTIM1->sTimerxRegs[2].CMP1xR = 4000u + delta / 2u;
+  if (vector_direction == 0u) {
+    HRTIM1->sTimerxRegs[0].CMP1xR = 4000u - delta;
+    HRTIM1->sTimerxRegs[1].CMP1xR = 4000u + delta / 2u;
+    HRTIM1->sTimerxRegs[2].CMP1xR = 4000u + delta / 2u;
+  } else {
+    /* Pure beta: A=0, B=+3/4 delta, C=-3/4 delta.
+     * Same 120-tick max line difference as a; vector magnitude is sqrt(3)/2
+     * of a, deliberately conservative rather than increasing line voltage. */
+    uint32_t beta = delta * 3u / 4u;
+    HRTIM1->sTimerxRegs[0].CMP1xR = 4000u;
+    HRTIM1->sTimerxRegs[1].CMP1xR = 4000u - beta;
+    HRTIM1->sTimerxRegs[2].CMP1xR = 4000u + beta;
+  }
 }
 
 static uint8_t configure_timer(void)
@@ -165,7 +176,7 @@ static void configure_adc_trigger(void)
              ADC_EXTERNALTRIGINJEC_HRTIM_TRG2|ADC_EXTERNALTRIGINJECCONV_EDGE_RISING);
 }
 
-static void start_vector(void)
+static void start_vector(uint8_t direction)
 {
   uint32_t now = HAL_GetTick();
   if (active_pair || expired || collecting || !zero_valid || !sample_valid ||
@@ -221,6 +232,7 @@ static void start_vector(void)
   if (active_pair != 5u || check_fault) {
     __set_PRIMASK(primask); stop_pwm(); return;
   }
+  vector_direction = direction;
   vector_samples = peak_counts = 0u;
   angle_start = encoder_angle;
   vector_start = adc_tick = HAL_GetTick();
@@ -229,7 +241,11 @@ static void start_vector(void)
   active_pair = 4u;
   HRTIM1->sCommonRegs.OENR = 0x3Fu;
   __set_PRIMASK(primask);
-  send_text("# VECTOR_BEGIN R5 TRG2; 100ms; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n");
+  char line[192];
+  (void)snprintf(line, sizeof(line),
+      "# VECTOR_BEGIN R6 dir=%c e_deg=%u TRG2; 100ms; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
+      direction ? 'b' : 'a', direction ? 90u : 0u);
+  send_text(line);
 }
 
 /* Read-only event diagnosis: no AF pins or output enables, independent of
@@ -243,7 +259,7 @@ static void diagnose_sync(void)
     return;
   }
   stop_pwm();
-  send_text("# DIAG_BEGIN R5 PWM_OFF; route=TA_CMP2->HRTIM_TRG2->ADC1; stages=POLL,IRQ,SW\r\n");
+  send_text("# DIAG_BEGIN R6 PWM_OFF; route=TA_CMP2->HRTIM_TRG2->ADC1; stages=POLL,IRQ,SW\r\n");
   if (!configure_timer()) {
     stop_pwm(); send_text("# DIAG_FAIL DLL_TIMEOUT PWM_OFF\r\n"); return;
   }
@@ -341,10 +357,10 @@ void board_check_init(void)
   MX_ADC1_Init();
   adc_ready = HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) == HAL_OK;
   if (adc_ready == 0u) check_fault = 1u;
-  send_text("# STEP2B_R5 FIXED_VECTOR_TRG2; PWM OFF at boot\r\n"
+  send_text("# STEP2B_R6 TWO_FIXED_VECTORS_TRG2; PWM OFF at boot\r\n"
             "# PA0/PA1 current ADC; 5mOhm x20; nominal VDDA=3.3V\r\n"
             "# z=zero; f=FireWater; t=text; x=stop; c=clear check_fault\r\n"
-            "# d=PWM-off diagnosis; a=single 100ms fixed vector; u/v/w disabled; current trip ~0.8A\r\n");
+            "# d=PWM-off diagnosis; a=0deg b=90deg fixed vector 100ms; u/v/w disabled; current trip ~0.8A\r\n");
   start_zero();
 }
 
@@ -355,10 +371,11 @@ void board_check_poll(void)
     stop_pwm();
     char line[192];
     (void)snprintf(line, sizeof(line),
-        "# VECTOR_END reason=%u (1=timeout 2=current 3=ADC_stale 4=encoder); samples=%lu peak_mA=%lu angle_start=%lu.%02lu angle_now=%lu.%02lu\r\n",
+        "# VECTOR_END reason=%u (1=timeout 2=current 3=ADC_stale 4=encoder); samples=%lu peak_mA=%lu angle_start=%lu.%02lu angle_now=%lu.%02lu dir=%c\r\n",
         reason, (unsigned long)vector_samples, (unsigned long)(peak_counts*33000u/4095u),
         (unsigned long)(angle_start/100u), (unsigned long)(angle_start%100u),
-        (unsigned long)(encoder_angle/100u), (unsigned long)(encoder_angle%100u));
+        (unsigned long)(encoder_angle/100u), (unsigned long)(encoder_angle%100u),
+        vector_direction ? 'b' : 'a');
     send_text(line);
   }
   if (active_pair != 0u) return; /* PWM ADC runs independently in its IRQ. */
@@ -401,14 +418,15 @@ void board_check_command(uint8_t command)
   switch (command) {
     case '?':
       send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear-and-zero\r\n"
-                "# d=PWM-off diagnosis; a=single 100ms fixed vector; 2s cooldown; u/v/w disabled\r\n");
+                "# d=PWM-off diagnosis; a=0deg b=90deg fixed vector 100ms; 2s cooldown; u/v/w disabled\r\n");
       break;
     case 'x': stop_pwm(); send_text("# STOP all bridge inputs low\r\n"); break;
     case 'z': start_zero(); break;
     case 'f': chart_mode = 1u;
       send_text("# CH: angle_deg,UA_mV,VA_mV,IU_mA,IV_mA,valid,zero_ok,pwm_pair,check_fault\r\n"); break;
     case 't': chart_mode = 0u; break;
-    case 'a': start_vector(); break;
+    case 'a': start_vector(0u); break;
+    case 'b': start_vector(1u); break;
     case 'd': diagnose_sync(); break;
     case 'u': case 'v': case 'w': send_text("# DISABLED in STEP2B; a=fixed vector only\r\n"); break;
     case 'c':
