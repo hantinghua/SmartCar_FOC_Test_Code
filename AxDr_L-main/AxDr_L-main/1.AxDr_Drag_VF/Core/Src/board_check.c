@@ -11,6 +11,9 @@
 #define SWEEP_MS 400u
 #define SWEEP_RAMP_MS 50u
 #define SWEEP_MOVE_MS 300u
+#define IDENT_ALIGN_MS 250u
+#define IDENT_MOVE_MS 2000u
+#define IDENT_TOTAL_MS 2500u
 #define CURRENT_LIMIT_COUNTS 99 /* ~0.8 A: 5 mOhm, gain 20, VDDA 3.3 V */
 static volatile uint16_t raw[2];
 static uint16_t offset[2], minimum[2], maximum[2];
@@ -20,16 +23,20 @@ static volatile uint8_t check_fault;
 static uint8_t timer_ready;
 static volatile uint32_t adc_tick, vector_samples, peak_counts;
 static volatile uint32_t diag_irq_entries, diag_irq_jeos;
-static uint32_t vector_start, next_allowed, encoder_tick, encoder_angle, angle_start;
+static uint32_t vector_start, next_allowed, encoder_angle, angle_start;
+static volatile uint32_t encoder_tick;
+static int32_t ident_travel, ident_base, ident_last_delta;
+static uint32_t ident_previous, ident_points, ident_base_angle;
+static uint8_t ident_have, ident_started;
 static uint8_t encoder_valid;
-static volatile uint8_t vector_direction; /* 0: alpha, 1: beta, 2: forward 0->90, 3: reverse 90->0 */
+static volatile uint8_t vector_direction; /* 0:a 1:b 2:g 3:j 4:n full-forward 5:m full-reverse */
 static volatile uint8_t active_pair, expired;
 static volatile uint32_t deadline;
 
 /* Phase duty offsets in timer ticks. Offline-generated alpha/beta rotation,
  * normalised so max phase-to-phase spread never exceeds 120/8000 (1.5%).
  * Integer-degree lookup keeps trigonometry out of the 20 kHz ADC IRQ. */
-static const int16_t sweep_phase[91][3] = {
+static const int16_t sweep_phase[361][3] = {
   {80, -40, -40},
   {79, -38, -40},
   {78, -36, -41},
@@ -120,7 +127,277 @@ static const int16_t sweep_phase[91][3] = {
   {3, 58, -61},
   {2, 58, -61},
   {1, 59, -60},
-  {0, 60, -60}
+  {0, 60, -60},
+  {-1, 60, -59},
+  {-2, 61, -58},
+  {-3, 61, -58},
+  {-4, 62, -57},
+  {-6, 63, -56},
+  {-7, 63, -56},
+  {-8, 64, -55},
+  {-9, 64, -55},
+  {-10, 65, -54},
+  {-12, 66, -53},
+  {-13, 66, -53},
+  {-14, 67, -52},
+  {-15, 67, -52},
+  {-17, 68, -51},
+  {-18, 69, -50},
+  {-19, 69, -50},
+  {-21, 70, -49},
+  {-22, 71, -48},
+  {-23, 71, -48},
+  {-25, 72, -47},
+  {-26, 73, -46},
+  {-27, 73, -46},
+  {-29, 74, -45},
+  {-30, 75, -44},
+  {-32, 76, -43},
+  {-33, 76, -43},
+  {-35, 77, -42},
+  {-36, 78, -41},
+  {-38, 79, -40},
+  {-39, 80, -40},
+  {-40, 79, -38},
+  {-41, 78, -36},
+  {-42, 77, -35},
+  {-43, 76, -33},
+  {-43, 76, -32},
+  {-44, 75, -30},
+  {-45, 74, -29},
+  {-46, 73, -27},
+  {-46, 73, -26},
+  {-47, 72, -25},
+  {-48, 71, -23},
+  {-48, 71, -22},
+  {-49, 70, -21},
+  {-50, 69, -19},
+  {-50, 69, -18},
+  {-51, 68, -17},
+  {-52, 67, -15},
+  {-52, 67, -14},
+  {-53, 66, -13},
+  {-53, 66, -12},
+  {-54, 65, -10},
+  {-55, 64, -9},
+  {-55, 64, -8},
+  {-56, 63, -7},
+  {-56, 63, -6},
+  {-57, 62, -4},
+  {-58, 61, -3},
+  {-58, 61, -2},
+  {-59, 60, -1},
+  {-60, 60, 0},
+  {-60, 59, 1},
+  {-61, 58, 2},
+  {-61, 58, 3},
+  {-62, 57, 4},
+  {-63, 56, 6},
+  {-63, 56, 7},
+  {-64, 55, 8},
+  {-64, 55, 9},
+  {-65, 54, 10},
+  {-66, 53, 12},
+  {-66, 53, 13},
+  {-67, 52, 14},
+  {-67, 52, 15},
+  {-68, 51, 17},
+  {-69, 50, 18},
+  {-69, 50, 19},
+  {-70, 49, 21},
+  {-71, 48, 22},
+  {-71, 48, 23},
+  {-72, 47, 25},
+  {-73, 46, 26},
+  {-73, 46, 27},
+  {-74, 45, 29},
+  {-75, 44, 30},
+  {-76, 43, 32},
+  {-76, 43, 33},
+  {-77, 42, 35},
+  {-78, 41, 36},
+  {-79, 40, 38},
+  {-80, 40, 39},
+  {-79, 38, 40},
+  {-78, 36, 41},
+  {-77, 35, 42},
+  {-76, 33, 43},
+  {-76, 32, 43},
+  {-75, 30, 44},
+  {-74, 29, 45},
+  {-73, 27, 46},
+  {-73, 26, 46},
+  {-72, 25, 47},
+  {-71, 23, 48},
+  {-71, 22, 48},
+  {-70, 21, 49},
+  {-69, 19, 50},
+  {-69, 18, 50},
+  {-68, 17, 51},
+  {-67, 15, 52},
+  {-67, 14, 52},
+  {-66, 13, 53},
+  {-66, 12, 53},
+  {-65, 10, 54},
+  {-64, 9, 55},
+  {-64, 8, 55},
+  {-63, 7, 56},
+  {-63, 6, 56},
+  {-62, 4, 57},
+  {-61, 3, 58},
+  {-61, 2, 58},
+  {-60, 1, 59},
+  {-60, 0, 60},
+  {-59, -1, 60},
+  {-58, -2, 61},
+  {-58, -3, 61},
+  {-57, -4, 62},
+  {-56, -6, 63},
+  {-56, -7, 63},
+  {-55, -8, 64},
+  {-55, -9, 64},
+  {-54, -10, 65},
+  {-53, -12, 66},
+  {-53, -13, 66},
+  {-52, -14, 67},
+  {-52, -15, 67},
+  {-51, -17, 68},
+  {-50, -18, 69},
+  {-50, -19, 69},
+  {-49, -21, 70},
+  {-48, -22, 71},
+  {-48, -23, 71},
+  {-47, -25, 72},
+  {-46, -26, 73},
+  {-46, -27, 73},
+  {-45, -29, 74},
+  {-44, -30, 75},
+  {-43, -32, 76},
+  {-43, -33, 76},
+  {-42, -35, 77},
+  {-41, -36, 78},
+  {-40, -38, 79},
+  {-40, -39, 79},
+  {-38, -40, 79},
+  {-36, -41, 78},
+  {-35, -42, 77},
+  {-33, -43, 76},
+  {-32, -43, 76},
+  {-30, -44, 75},
+  {-29, -45, 74},
+  {-27, -46, 73},
+  {-26, -46, 73},
+  {-25, -47, 72},
+  {-23, -48, 71},
+  {-22, -48, 71},
+  {-21, -49, 70},
+  {-19, -50, 69},
+  {-18, -50, 69},
+  {-17, -51, 68},
+  {-15, -52, 67},
+  {-14, -52, 67},
+  {-13, -53, 66},
+  {-12, -53, 66},
+  {-10, -54, 65},
+  {-9, -55, 64},
+  {-8, -55, 64},
+  {-7, -56, 63},
+  {-6, -56, 63},
+  {-4, -57, 62},
+  {-3, -58, 61},
+  {-2, -58, 61},
+  {-1, -59, 60},
+  {0, -59, 60},
+  {1, -60, 59},
+  {2, -61, 58},
+  {3, -61, 58},
+  {4, -62, 57},
+  {6, -63, 56},
+  {7, -63, 56},
+  {8, -64, 55},
+  {9, -64, 55},
+  {10, -65, 54},
+  {12, -66, 53},
+  {13, -66, 53},
+  {14, -67, 52},
+  {15, -67, 52},
+  {17, -68, 51},
+  {18, -69, 50},
+  {19, -69, 50},
+  {21, -70, 49},
+  {22, -71, 48},
+  {23, -71, 48},
+  {25, -72, 47},
+  {26, -73, 46},
+  {27, -73, 46},
+  {29, -74, 45},
+  {30, -75, 44},
+  {32, -76, 43},
+  {33, -76, 43},
+  {35, -77, 42},
+  {36, -78, 41},
+  {38, -79, 40},
+  {40, -80, 39},
+  {40, -79, 38},
+  {41, -78, 36},
+  {42, -77, 35},
+  {43, -76, 33},
+  {43, -76, 32},
+  {44, -75, 30},
+  {45, -74, 29},
+  {46, -73, 27},
+  {46, -73, 26},
+  {47, -72, 25},
+  {48, -71, 23},
+  {48, -71, 22},
+  {49, -70, 21},
+  {50, -69, 19},
+  {50, -69, 18},
+  {51, -68, 17},
+  {52, -67, 15},
+  {52, -67, 14},
+  {53, -66, 13},
+  {53, -66, 12},
+  {54, -65, 10},
+  {55, -64, 9},
+  {55, -64, 8},
+  {56, -63, 7},
+  {56, -63, 6},
+  {57, -62, 4},
+  {58, -61, 3},
+  {58, -61, 2},
+  {59, -60, 1},
+  {59, -60, 0},
+  {60, -59, -1},
+  {61, -58, -2},
+  {61, -58, -3},
+  {62, -57, -4},
+  {63, -56, -6},
+  {63, -56, -7},
+  {64, -55, -8},
+  {64, -55, -9},
+  {65, -54, -10},
+  {66, -53, -12},
+  {66, -53, -13},
+  {67, -52, -14},
+  {67, -52, -15},
+  {68, -51, -17},
+  {69, -50, -18},
+  {69, -50, -19},
+  {70, -49, -21},
+  {71, -48, -22},
+  {71, -48, -23},
+  {72, -47, -25},
+  {73, -46, -26},
+  {73, -46, -27},
+  {74, -45, -29},
+  {75, -44, -30},
+  {76, -43, -32},
+  {76, -43, -33},
+  {77, -42, -35},
+  {78, -41, -36},
+  {79, -40, -38},
+  {80, -40, -40}
 };
 
 static void send_text(const char *s)
@@ -176,11 +453,29 @@ void board_check_tick(void)
     uint32_t now = HAL_GetTick();
     if (active_pair == 4u && (int32_t)(now - deadline) >= 0) cut_output(1u);
     else if (now - adc_tick >= 2u) cut_output(3u);
+    else if (active_pair == 4u && now-encoder_tick > 100u) cut_output(4u);
   }
 }
 
 void board_check_encoder(uint32_t angle, uint8_t ok)
 {
+  if (ok && active_pair == 4u && vector_direction >= 4u) {
+    if (ident_have) {
+      int32_t change = (int32_t)angle - (int32_t)ident_previous;
+      if (change > 18000) change -= 36000;
+      if (change < -18000) change += 36000;
+      ident_travel += change;
+      ident_last_delta = change;
+    }
+    ident_previous = angle;
+    ident_have = 1u;
+    ident_points++;
+    if (!ident_started && HAL_GetTick()-vector_start >= IDENT_ALIGN_MS) {
+      ident_base = ident_travel;
+      ident_base_angle = angle;
+      ident_started = 1u;
+    }
+  }
   encoder_angle = angle;
   encoder_tick = HAL_GetTick();
   encoder_valid = ok;
@@ -219,10 +514,18 @@ void board_check_adc_irq(void)
     HRTIM1->sTimerxRegs[1].CMP1xR = 4000u + delta / 2u;
     HRTIM1->sTimerxRegs[2].CMP1xR = 4000u + delta / 2u;
   } else if (vector_direction >= 2u) {
-    uint32_t degree = elapsed <= SWEEP_RAMP_MS ? 0u :
-        (elapsed-SWEEP_RAMP_MS) * 90u / SWEEP_MOVE_MS;
-    if (degree > 90u) degree = 90u;
-    if (vector_direction == 3u) degree = 90u - degree;
+    uint32_t degree;
+    if (vector_direction >= 4u) {
+      degree = elapsed <= IDENT_ALIGN_MS ? 0u :
+          (elapsed-IDENT_ALIGN_MS)*360u/IDENT_MOVE_MS;
+      if (degree > 360u) degree = 360u;
+      if (vector_direction == 5u) degree = 360u-degree;
+    } else {
+      degree = elapsed <= SWEEP_RAMP_MS ? 0u :
+          (elapsed-SWEEP_RAMP_MS)*90u/SWEEP_MOVE_MS;
+      if (degree > 90u) degree = 90u;
+      if (vector_direction == 3u) degree = 90u-degree;
+    }
     uint32_t ramp = elapsed < SWEEP_RAMP_MS ? elapsed : SWEEP_RAMP_MS;
     for (uint32_t phase = 0u; phase < 3u; phase++) {
       int32_t ticks = (int32_t)sweep_phase[degree][phase] * (int32_t)ramp / (int32_t)SWEEP_RAMP_MS;
@@ -286,6 +589,12 @@ static void configure_adc_trigger(void)
              ADC_EXTERNALTRIGINJEC_HRTIM_TRG2|ADC_EXTERNALTRIGINJECCONV_EDGE_RISING);
 }
 
+static char vector_label(uint8_t direction)
+{
+  static const char labels[] = "abgjnm";
+  return direction < 6u ? labels[direction] : '?';
+}
+
 static void start_vector(uint8_t direction)
 {
   uint32_t now = HAL_GetTick();
@@ -346,18 +655,21 @@ static void start_vector(uint8_t direction)
   vector_samples = peak_counts = 0u;
   angle_start = encoder_angle;
   vector_start = adc_tick = HAL_GetTick();
-  uint32_t duration = direction >= 2u ? SWEEP_MS : VECTOR_MS;
+  ident_travel = ident_base = ident_last_delta = 0;
+  ident_points = ident_base_angle = 0u;
+  ident_have = ident_started = 0u;
+  uint32_t duration = direction >= 4u ? IDENT_TOTAL_MS : (direction >= 2u ? SWEEP_MS : VECTOR_MS);
   deadline = vector_start + duration;
-  next_allowed = vector_start + duration + 2000u;
+  next_allowed = vector_start + duration + (direction >= 4u ? 5000u : 2000u);
   active_pair = 4u;
   HRTIM1->sCommonRegs.OENR = 0x3Fu;
   __set_PRIMASK(primask);
   char line[192];
   (void)snprintf(line, sizeof(line),
-      "# VECTOR_BEGIN R8 dir=%c e_start=%u e_end=%u TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
-      direction == 3u ? 'j' : (direction == 2u ? 'g' : (direction ? 'b' : 'a')),
-      (direction == 1u || direction == 3u) ? 90u : 0u,
-      (direction == 1u || direction == 2u) ? 90u : 0u,
+      "# VECTOR_BEGIN R9 dir=%c e_start=%u e_end=%u TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
+      vector_label(direction),
+      (direction == 5u ? 360u : ((direction == 1u || direction == 3u) ? 90u : 0u)),
+      (direction == 4u ? 360u : ((direction == 1u || direction == 2u) ? 90u : 0u)),
       (unsigned long)duration);
   send_text(line);
 }
@@ -373,7 +685,7 @@ static void diagnose_sync(void)
     return;
   }
   stop_pwm();
-  send_text("# DIAG_BEGIN R8 PWM_OFF; route=TA_CMP2->HRTIM_TRG2->ADC1; stages=POLL,IRQ,SW\r\n");
+  send_text("# DIAG_BEGIN R9 PWM_OFF; route=TA_CMP2->HRTIM_TRG2->ADC1; stages=POLL,IRQ,SW\r\n");
   if (!configure_timer()) {
     stop_pwm(); send_text("# DIAG_FAIL DLL_TIMEOUT PWM_OFF\r\n"); return;
   }
@@ -471,10 +783,10 @@ void board_check_init(void)
   MX_ADC1_Init();
   adc_ready = HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) == HAL_OK;
   if (adc_ready == 0u) check_fault = 1u;
-  send_text("# STEP2B_R8 BIDIRECTIONAL_SWEEP_TRG2; PWM OFF at boot\r\n"
+  send_text("# STEP2B_R9 POLE_DIRECTION_SURVEY; PWM OFF at boot\r\n"
             "# PA0/PA1 current ADC; 5mOhm x20; nominal VDDA=3.3V\r\n"
             "# z=zero; f=FireWater; t=text; x=stop; c=clear check_fault\r\n"
-            "# d=PWM-off diagnosis; a/b=fixed 100ms; g=0to90 j=90to0 sweep 400ms; u/v/w disabled; current trip ~0.8A\r\n");
+            "# d=PWM-off diagnosis; a/b=fixed 100ms; g/j=90deg 400ms; n/m=360deg survey 2500ms; u/v/w disabled; current trip ~0.8A\r\n");
   start_zero();
 }
 
@@ -483,14 +795,27 @@ void board_check_poll(void)
   if (expired != 0u) {
     uint8_t reason = expired;
     stop_pwm();
-    char line[192];
+    char line[256];
     (void)snprintf(line, sizeof(line),
         "# VECTOR_END reason=%u (1=timeout 2=current 3=ADC_stale 4=encoder); samples=%lu peak_mA=%lu angle_start=%lu.%02lu angle_now=%lu.%02lu dir=%c\r\n",
         reason, (unsigned long)vector_samples, (unsigned long)(peak_counts*33000u/4095u),
         (unsigned long)(angle_start/100u), (unsigned long)(angle_start%100u),
         (unsigned long)(encoder_angle/100u), (unsigned long)(encoder_angle%100u),
-        vector_direction == 3u ? 'j' : (vector_direction == 2u ? 'g' : (vector_direction ? 'b' : 'a')));
+        vector_label(vector_direction));
     send_text(line);
+    if (vector_direction >= 4u) {
+      int32_t travel = ident_travel-ident_base;
+      uint32_t magnitude = travel < 0 ? (uint32_t)-travel : (uint32_t)travel;
+      uint32_t ratio100 = (ident_started && magnitude) ? 3600000u/magnitude : 0u;
+      uint32_t nearest = (ratio100+50u)/100u;
+      (void)snprintf(line, sizeof(line),
+          "# IDENT dir=%c reason=%u base_deg=%lu.%02lu travel_cd=%ld points=%lu last_delta_cd=%ld ratio=%lu.%02lu pole_candidate=%lu; TENTATIVE NOT_SAVED\r\n",
+          vector_label(vector_direction), reason,
+          (unsigned long)(ident_base_angle/100u), (unsigned long)(ident_base_angle%100u),
+          (long)travel, (unsigned long)ident_points, (long)ident_last_delta,
+          (unsigned long)(ratio100/100u), (unsigned long)(ratio100%100u), (unsigned long)nearest);
+      send_text(line);
+    }
   }
   if (active_pair != 0u) return; /* PWM ADC runs independently in its IRQ. */
   uint32_t now = HAL_GetTick();
@@ -532,7 +857,7 @@ void board_check_command(uint8_t command)
   switch (command) {
     case '?':
       send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear-and-zero\r\n"
-                "# d=PWM-off diagnosis; a/b=fixed 100ms; g=0to90 j=90to0 sweep 400ms; 2s cooldown; u/v/w disabled\r\n");
+                "# d=PWM-off diagnosis; a/b=fixed 100ms; g/j=90deg 400ms; n/m=360deg survey 2500ms; 2s cooldown; u/v/w disabled\r\n");
       break;
     case 'x': stop_pwm(); send_text("# STOP all bridge inputs low\r\n"); break;
     case 'z': start_zero(); break;
@@ -543,6 +868,8 @@ void board_check_command(uint8_t command)
     case 'b': start_vector(1u); break;
     case 'g': start_vector(2u); break;
     case 'j': start_vector(3u); break;
+    case 'n': start_vector(4u); break;
+    case 'm': start_vector(5u); break;
     case 'd': diagnose_sync(); break;
     case 'u': case 'v': case 'w': send_text("# DISABLED in STEP2B; a=fixed vector only\r\n"); break;
     case 'c':
