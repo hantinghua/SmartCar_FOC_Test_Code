@@ -5,6 +5,7 @@
 #include "usart.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #define ZERO_SAMPLES 256u
 #define VECTOR_MS 100u
@@ -53,6 +54,8 @@ static int32_t approach_sum[2], approach_min[2], approach_max[2];
 static volatile uint32_t current_check_count;
 static volatile int32_t current_check_sum[2];
 static volatile int32_t current_check_min[2], current_check_max[2];
+static uint8_t map_next_step;
+static volatile uint32_t map_degree;
 static uint8_t encoder_valid;
 static volatile uint8_t vector_direction; /* 0:a 1:b 2:g 3:j 4:n full-forward 5:m full-reverse 6:l zero alignment 7:k local scan 8:i alpha check 9:y beta check */
 static volatile uint8_t active_pair, expired;
@@ -557,7 +560,7 @@ void board_check_encoder(uint32_t angle, uint8_t ok)
       local_zero_count[index]++;
     }
   }
-  if (ok && active_pair == 4u && (vector_direction == 6u || vector_direction == 8u || vector_direction == 9u) &&
+  if (ok && active_pair == 4u && (vector_direction == 6u || vector_direction == 8u || vector_direction == 9u || vector_direction == 11u) &&
       HAL_GetTick()-vector_start >= ALIGN_TOTAL_MS-ALIGN_WINDOW_MS) {
     if (!align_count) {
       align_anchor = angle;
@@ -619,7 +622,7 @@ void board_check_adc_irq(void)
    * CMP1 is the rising edge: all low-side FETs are ON at CMP2=1600.
    * Updates happen after ADC completion, well before CMP1 near 4000. */
   uint32_t elapsed = adc_tick - vector_start;
-  if ((vector_direction == 8u || vector_direction == 9u) && elapsed >= 500u) {
+  if ((vector_direction == 8u || vector_direction == 9u || vector_direction == 11u) && elapsed >= 500u) {
     int32_t values[2] = {-iu, -iv}; /* Display convention: zero minus ADC. */
     for (uint32_t i = 0u; i < 2u; i++) {
       current_check_sum[i] += values[i];
@@ -633,9 +636,13 @@ void board_check_adc_irq(void)
     HRTIM1->sTimerxRegs[0].CMP1xR = 4000u - delta;
     HRTIM1->sTimerxRegs[1].CMP1xR = 4000u + delta / 2u;
     HRTIM1->sTimerxRegs[2].CMP1xR = 4000u + delta / 2u;
-  } else if ((vector_direction >= 2u && vector_direction <= 7u) || vector_direction == 10u) {
+  } else if ((vector_direction >= 2u && vector_direction <= 7u) || vector_direction == 10u || vector_direction == 11u) {
     uint32_t degree;
-    if (vector_direction == 7u || vector_direction == 10u) {
+    if (vector_direction == 11u) {
+      degree = map_degree;
+      local_command_deg = (int32_t)degree;
+      local_stage = elapsed < 50u ? 1u : (elapsed < 500u ? 2u : 3u);
+    } else if (vector_direction == 7u || vector_direction == 10u) {
       uint8_t stage;
       int32_t target = vector_direction == 10u ? approach_target(elapsed, &stage) : local_target(elapsed, &stage);
       local_command_deg = target;
@@ -718,8 +725,8 @@ static void configure_adc_trigger(void)
 
 static char vector_label(uint8_t direction)
 {
-  static const char labels[] = "abgjnmlkiyq";
-  return direction < 11u ? labels[direction] : '?';
+  static const char labels[] = "abgjnmlkiyqh";
+  return direction < 12u ? labels[direction] : '?';
 }
 
 static void start_vector(uint8_t direction)
@@ -791,6 +798,7 @@ static void start_vector(uint8_t direction)
     approach_sum[i]=approach_min[i]=approach_max[i]=0;
   }
   vector_direction = direction;
+  if (direction == 11u) map_degree = (uint32_t)map_next_step * 30u;
   vector_samples = peak_counts = 0u;
   angle_start = encoder_angle;
   vector_start = adc_tick = HAL_GetTick();
@@ -814,12 +822,13 @@ static void start_vector(uint8_t direction)
   __set_PRIMASK(primask);
   char line[192];
   (void)snprintf(line, sizeof(line),
-      "# VECTOR_BEGIN R15 dir=%c e_start=%ld e_end=%ld TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
+      "# VECTOR_BEGIN R16 dir=%c e_start=%ld e_end=%ld TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
       vector_label(direction),
-      (long)(direction == 10u ? -45 : direction == 7u ? -25 : (direction == 5u ? 360 : ((direction == 1u || direction == 3u || direction == 9u) ? 90 : 0))),
-      (long)(direction == 7u ? -25 : (direction == 4u ? 360 : ((direction == 1u || direction == 2u || direction == 9u) ? 90 : 0))),
+      (long)(direction == 11u ? (int32_t)map_degree : direction == 10u ? -45 : direction == 7u ? -25 : (direction == 5u ? 360 : ((direction == 1u || direction == 3u || direction == 9u) ? 90 : 0))),
+      (long)(direction == 11u ? (int32_t)map_degree : direction == 7u ? -25 : (direction == 4u ? 360 : ((direction == 1u || direction == 2u || direction == 9u) ? 90 : 0))),
       (unsigned long)duration);
   send_text(line);
+  if (direction == 11u) send_text("# MAP_PLAN one point only; last200ms stats; next h after stop +5s; no angle feedback; NOT_SAVED\r\n");
   if (direction == 10u) send_text("# APPROACH_PLAN -45->0 HOLD700ms ->+45->0 HOLD700ms; final200ms stats each; NOT_SAVED\r\n");
   if (direction == 7u) send_text("# LOCAL_PLAN e_deg=-25->+25->-25; 2700ms; measured mech guard=10..30deg; x=stop\r\n");
 }
@@ -973,9 +982,9 @@ void board_check_init(void)
   MX_ADC1_Init();
   adc_ready = HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) == HAL_OK;
   if (adc_ready == 0u) check_fault = 1u;
-  send_text("# STEP2B_R15 TWO_SIDED_HOLD MCU_DT_200NS; PWM OFF at boot\r\n"
+  send_text("# STEP2B_R16 CURRENT_VECTOR_MAP MCU_DT_200NS; PWM OFF at boot\r\n"
             "# PA0/PA1 current ADC; 5mOhm x20; nominal VDDA=3.3V\r\n"
-            "# z=zero; f=FireWater; t=text; x=stop; c=clear check_fault\r\n"
+            "# z=zero; f=FireWater; t=text; x=stop; c=clear check_fault; h=one vector map point 0:30:330deg\r\n"
             "# d=PWM-off diagnosis; a/b=fixed 100ms; g/j=90deg 400ms; n/m=360deg survey 2500ms; l=align700ms; k=local2700ms; q=two-sided-hold3700ms; e=auditOFF; i/y=current-check700ms; u/v/w disabled; current trip ~0.8A\r\n");
   start_zero();
 }
@@ -1004,6 +1013,47 @@ void board_check_poll(void)
           (unsigned long)(ident_base_angle/100u), (unsigned long)(ident_base_angle%100u),
           (long)travel, (unsigned long)ident_points, (long)ident_last_delta,
           (unsigned long)(ratio100/100u), (unsigned long)(ratio100%100u), (unsigned long)nearest);
+      send_text(line);
+    }
+    if (vector_direction == 11u) {
+      uint32_t count = current_check_count;
+      uint32_t span = align_count ? (uint32_t)(align_max-align_min) : 0u;
+      uint32_t coverage = align_count ? align_last_tick-align_first_tick : 0u;
+      uint32_t age = align_count ? vector_start+ALIGN_TOTAL_MS-align_last_tick : 999u;
+      uint8_t usable = reason == 1u && !check_fault && count >= 3500u && count <= 4100u &&
+          align_count >= 8u && coverage >= 140u && age <= 60u && span <= ALIGN_MAX_SPAN_CD;
+      (void)snprintf(line, sizeof(line),
+          "# MAP_POINT step=%u/12 cmd_e_deg=%lu reason=%u adc_n=%lu mech_n=%lu window_ms=%lu span_mech_cd=%lu usable=%u; SAMPLED_CURRENT_ONLY\r\n",
+          (unsigned int)(map_degree/30u+1u), (unsigned long)map_degree, reason,
+          (unsigned long)count, (unsigned long)align_count, (unsigned long)coverage, (unsigned long)span, usable);
+      send_text(line);
+      if (count && reason == 1u) {
+        float u = (float)current_check_sum[0]/(float)count*33000.0f/4095.0f;
+        float v = (float)current_check_sum[1]/(float)count*33000.0f/4095.0f;
+        float beta = (u+2.0f*v)*0.577350269f;
+        float magnitude = sqrtf(u*u+beta*beta);
+        int32_t measured = wrap_angle_cd((int32_t)(atan2f(beta,u)*5729.57795f));
+        int32_t a = sweep_phase[map_degree][0], b = sweep_phase[map_degree][1], c = sweep_phase[map_degree][2];
+        int32_t expected = wrap_angle_cd((int32_t)(atan2f((float)(b-c)*0.577350269f,
+            (float)(2*a-b-c)/3.0f)*5729.57795f));
+        (void)snprintf(line, sizeof(line),
+            "# MAP_MEAN U_V_W_mA=%ld,%ld,%ld alpha_beta_mA=%ld,%ld mag_mA=%ld; W_RECONSTRUCTED\r\n",
+            (long)u,(long)v,(long)(-u-v),(long)u,(long)beta,(long)magnitude);
+        send_text(line);
+        (void)snprintf(line, sizeof(line),
+            "# MAP_ANGLE expected_e_cd=%ld measured_e_cd=%ld error_e_cd=%ld angle_valid=%u; ticks=%ld,%ld,%ld; NOT_ZERO_CAL\r\n",
+            (long)expected,(long)measured,(long)signed_angle_cd(measured-expected),
+            (unsigned int)(usable && magnitude >= 80.0f),(long)a,(long)b,(long)c);
+        send_text(line);
+        (void)snprintf(line, sizeof(line),
+            "# MAP_RANGE U_counts=%ld..%ld V_counts=%ld..%ld; fixed ADC phase=10us; NOT_GAIN_CAL\r\n",
+            (long)current_check_min[0],(long)current_check_max[0],(long)current_check_min[1],(long)current_check_max[1]);
+        send_text(line);
+      }
+      /* Do not silently skip unstable, interrupted or faulted points. */
+      if (usable) map_next_step = (uint8_t)((map_next_step+1u)%12u);
+      (void)snprintf(line,sizeof(line),"# MAP_NEXT cmd_e_deg=%u; manual h only; wait5s; reset restarts at0\r\n",
+          (unsigned int)(map_next_step*30u));
       send_text(line);
     }
     if (vector_direction == 8u || vector_direction == 9u) {
@@ -1137,7 +1187,7 @@ void board_check_command(uint8_t command)
 {
   switch (command) {
     case '?':
-      send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear-and-zero\r\n"
+      send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear-and-zero; h=one current vector point 0:30:330deg\r\n"
                 "# d=PWM-off diagnosis; a/b=fixed 100ms; g/j=90deg 400ms; n/m=360deg survey 2500ms; l=align700ms; k=local2700ms; q=two-sided-hold3700ms; e=auditOFF; i/y=current-check700ms; 2s cooldown; u/v/w disabled\r\n");
       break;
     case 'x': stop_pwm(); send_text("# STOP all bridge inputs low\r\n"); break;
@@ -1157,6 +1207,7 @@ void board_check_command(uint8_t command)
     case 'i': start_vector(8u); break;
     case 'y': start_vector(9u); break;
     case 'q': start_vector(10u); break;
+    case 'h': start_vector(11u); break;
     case 'd': diagnose_sync(); break;
     case 'u': case 'v': case 'w': send_text("# DISABLED in STEP2B; a=fixed vector only\r\n"); break;
     case 'c':
@@ -1184,8 +1235,8 @@ void board_check_report(uint32_t angle_centideg, uint8_t encoder_ok)
         (unsigned long)(angle_centideg / 100u), (unsigned long)(angle_centideg % 100u),
         (unsigned long)mv0, (unsigned long)mv1, (long)ma0, (long)ma1,
         (unsigned int)(valid && encoder_ok), zero_valid, active_pair, check_fault,
-        (long)(active_pair == 4u && (vector_direction == 7u || vector_direction == 10u) ? local_command_deg : 0),
-        (unsigned int)(active_pair == 4u && (vector_direction == 7u || vector_direction == 10u) ? local_stage : 0u));
+        (long)(active_pair == 4u && (vector_direction == 7u || vector_direction == 10u || vector_direction == 11u) ? local_command_deg : 0),
+        (unsigned int)(active_pair == 4u && (vector_direction == 7u || vector_direction == 10u || vector_direction == 11u) ? local_stage : 0u));
   } else {
     (void)snprintf(line, sizeof(line),
         "# ADC raw=%u,%u mV=%lu,%lu zero=%u,%u I_mA=%ld,%ld valid=%u zero_ok=%u pwm_pair=%u check_fault=%u adc_err=%lu\r\n",

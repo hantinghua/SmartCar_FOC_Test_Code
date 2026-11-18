@@ -37,7 +37,7 @@ static void print_help(void)
               "USART3 PC10=TX PC11=RX 115200 8N1\r\n"
               "ENC1 PB3=SCK PB4=MISO PB5=MOSI PA15=CS\r\n"
               "ANGLE_BITS=14; raw16 retained; verify ONE wrap per shaft turn\r\n"
-              "? or h: help; p: pause; r: resume; s: one sample\r\n");
+              "?: help; h: one current vector point; p: pause; r: resume; s: one sample\r\n");
 }
 
 /* Keep the hardware transfer sequence used before cleanup. Reference:
@@ -145,7 +145,7 @@ static void poll_serial(void)
   uint8_t ch;
   if (HAL_UART_Receive(&huart3, &ch, 1u, 0u) == HAL_OK) {
     switch (ch) {
-      case '?': case 'h': print_help(); board_check_command('?'); break;
+      case '?': print_help(); board_check_command('?'); break;
       case 'p': stream_enabled = 0u; serial_text("STREAM=PAUSED mode=FIXED_VECTOR_TEST\r\n"); break;
       case 'r': stream_enabled = 1u; serial_text("STREAM=RUNNING mode=FIXED_VECTOR_TEST\r\n"); break;
       case 's':
