@@ -10,4 +10,5 @@ void board_check_command(uint8_t command);
 void board_check_report(uint32_t angle_centideg, uint8_t encoder_ok);
 uint8_t board_check_fault(void);
 uint8_t board_check_chart(void);
+uint8_t board_check_torque_active(void);
 #endif

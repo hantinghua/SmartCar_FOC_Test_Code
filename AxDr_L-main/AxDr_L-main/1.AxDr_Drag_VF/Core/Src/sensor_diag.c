@@ -144,6 +144,8 @@ static void poll_serial(void)
 {
   uint8_t ch;
   if (HAL_UART_Receive(&huart3, &ch, 1u, 0u) == HAL_OK) {
+    /* Active torque pulses need fresh encoder data even when the host sends commands. */
+    if (board_check_torque_active() && ch != 'x') return;
     switch (ch) {
       case '?': print_help(); board_check_command('?'); break;
       case 'p': stream_enabled = 0u; serial_text("STREAM=PAUSED mode=FIXED_VECTOR_TEST\r\n"); break;
@@ -176,13 +178,15 @@ void sensor_diag_poll(void)
   uint32_t now = HAL_GetTick();
   poll_serial();
   board_check_poll();
-  if ((uint32_t)(now - sample_tick) >= 20u) {
+  uint8_t torque_active=board_check_torque_active();
+  uint32_t encoder_period=torque_active ? 2u : 20u;
+  if ((uint32_t)(now - sample_tick) >= encoder_period) {
     sample_tick = now;
     sample_encoder();
   }
   if ((uint32_t)(now - report_tick) >= (board_check_chart() ? 20u : 200u)) {
     report_tick = now;
-    if (stream_enabled != 0u) {
+    if (stream_enabled != 0u && !torque_active) {
       if (board_check_chart() == 0u) report_encoder();
       board_check_report((uint32_t)g_step1_raw * 36000u / ENCODER_COUNTS,
                         g_step1_spi_ok && g_step1_raw16 != 0xFFFFu);

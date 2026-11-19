@@ -1,5 +1,4 @@
-/* Step 2B: single 100 ms fixed-vector pulse; no closed-loop rotation.
- * PWM-synchronised injected ADC, software current trip and timeout. */
+/* Bench motor tests with PWM-synchronised injected ADC, software current trip and timeout. */
 #include "board_check.h"
 #include "adc.h"
 #include "usart.h"
@@ -49,13 +48,93 @@ static int32_t local_zero_sum[2];
 static uint32_t local_zero_count[2];
 static volatile int32_t local_command_deg;
 static volatile uint8_t local_stage;
-static uint32_t approach_anchor[2], approach_count[2], approach_first[2], approach_last[2];
-static int32_t approach_sum[2], approach_min[2], approach_max[2];
+static uint32_t approach_anchor[4], approach_count[4], approach_first[4], approach_last[4];
+static int32_t approach_sum[4], approach_min[4], approach_max[4];
 static volatile uint32_t current_check_count;
 static volatile int32_t current_check_sum[2];
 static volatile int32_t current_check_min[2], current_check_max[2];
 static uint8_t map_next_step;
 static volatile uint32_t map_degree;
+/* Current checks in the stator frame and short torque pulses in the rotor frame. */
+#define TRACK_ALPHA 12u
+#define TRACK_BETA  13u
+#define TRACK_APPROACH 14u
+#define TORQUE_POSITIVE 15u
+#define TORQUE_NEGATIVE 16u
+#define TORQUE_ALIGN_MS 850u
+#define TORQUE_PULSE_MS 500u
+#define TORQUE_RAMP_MS 80u
+#define TORQUE_STATS_MS 100u
+#define TORQUE_TARGET_MA 100
+#define TORQUE_ENCODER_TIMEOUT_MS 8u
+#define TORQUE_START_MIN_CD 2000
+#define TORQUE_START_MAX_CD 2200
+#define TORQUE_TRAVEL_LIMIT_CD 300
+#define TORQUE_ALIGN_REJECTED 10u
+#define TORQUE_D_MAX_TICKS 48
+#define TORQUE_Q_MAX_TICKS 34
+static uint8_t is_torque(uint8_t mode) { return mode == TORQUE_POSITIVE || mode == TORQUE_NEGATIVE; }
+
+/* Encoder updates run in foreground. Only this test uses the rotor angle in ADC IRQ. */
+static struct {
+  volatile uint32_t angle, tick, align_count;
+  volatile int32_t align_sum, align_min, align_max;
+  uint32_t anchor;
+  volatile uint32_t count, limited, early_count, early_limited;
+  volatile int32_t sum_d, sum_q, early_sum_d, early_sum_q;
+  volatile int32_t min_travel, max_travel, end_travel;
+  volatile uint8_t aligned;
+} torque;
+static uint8_t is_track(uint8_t mode) { return mode == TRACK_ALPHA || mode == TRACK_BETA; }
+#define TRACK_TARGET_MA 200
+#define TRACK_RAMP_MS 100u
+#define TRACK_BLOCK 20u /* 20 synchronous samples per PI update, nominal 1 ms */
+static struct {
+  uint32_t sub, n, limited, wrong_blocks;
+  int32_t adc_sum[2], integral[2], sum[2], lo[2], hi[2];
+} track;
+/* Voltage q keeps its original timing. Current 3 holds each departure at full
+ * reference for 700 ms. Use the same endpoints for control and diagnostics. */
+#define CA_DEPART_HOLD_MS 700u
+#define CA_SWEEP_MS 600u
+#define CA_ZERO_HOLD_MS 700u
+#define CA_NEG_END_MS (TRACK_RAMP_MS + CA_DEPART_HOLD_MS)
+#define CA_ZERO1_END_MS (CA_NEG_END_MS + CA_SWEEP_MS + CA_ZERO_HOLD_MS)
+#define CA_POS_START_MS (CA_ZERO1_END_MS + CA_SWEEP_MS)
+#define CA_POS_END_MS (CA_POS_START_MS + CA_DEPART_HOLD_MS)
+#define CA_TOTAL_MS (CA_POS_END_MS + CA_SWEEP_MS + CA_ZERO_HOLD_MS)
+/* Sample the last 40 ms before the outward sweep through the +45 hold.
+ * Capture only in foreground encoder polling, no added UART during drive. */
+#define TRACE_BEGIN_MS (CA_ZERO1_END_MS-40u)
+#define TRACE_END_MS CA_POS_END_MS
+static struct {
+  uint16_t ms, cd, current_age_ms;
+  int16_t ia_mA, ib_mA;
+} trace_pt[80];
+static volatile int32_t trace_current_a, trace_current_b;
+static volatile uint32_t trace_current_ms;
+static uint32_t trace_n;
+static uint8_t trace_overflow;
+/* Windows 0/1: zero holds, 2/3: late departure, 4/5: early departure (current only). */
+static struct { uint32_t n,limited,bad; int32_t sum_a,sum_b; } approach_i[6];
+static const uint16_t window_end_ms[6]={CA_ZERO1_END_MS,CA_TOTAL_MS,CA_NEG_END_MS,CA_POS_END_MS,
+                                        TRACK_RAMP_MS+100u,CA_POS_START_MS+100u};
+static int32_t approach_window(uint32_t ms) {
+  for (uint32_t i=0;i<6;i++) {
+    uint32_t end=window_end_ms[i], width=i<2u ? 200u : 100u;
+    if (ms>=end-width && ms<end) return (int32_t)i;
+  }
+  return -1;
+}
+/* Unit vector scaled by TRACK_TARGET_MA, degrees 0..45. */
+static const int16_t approach_ref[46][2]={
+  {200,0},{200,3},{200,7},{200,10},{200,14},{199,17},{199,21},{199,24},
+  {198,28},{198,31},{197,35},{196,38},{196,42},{195,45},{194,48},{193,52},
+  {192,55},{191,58},{190,62},{189,65},{188,68},{187,72},{185,75},{184,78},
+  {183,81},{181,85},{180,88},{178,91},{177,94},{175,97},{173,100},{171,103},
+  {170,106},{168,109},{166,112},{164,115},{162,118},{160,120},{158,123},{155,126},
+  {153,129},{151,131},{149,134},{146,136},{144,139},{141,141}
+};
 static uint8_t encoder_valid;
 static volatile uint8_t vector_direction; /* 0:a 1:b 2:g 3:j 4:n full-forward 5:m full-reverse 6:l zero alignment 7:k local scan 8:i alpha check 9:y beta check */
 static volatile uint8_t active_pair, expired;
@@ -481,7 +560,12 @@ void board_check_tick(void)
     uint32_t now = HAL_GetTick();
     if (active_pair == 4u && (int32_t)(now - deadline) >= 0) cut_output(1u);
     else if (now - adc_tick >= 2u) cut_output(3u);
-    else if (active_pair == 4u && now-encoder_tick > 100u) cut_output(4u);
+    else if (active_pair == 4u) {
+      if (is_torque(vector_direction)) {
+        if (now-vector_start >= TORQUE_ENCODER_TIMEOUT_MS && now-torque.tick >= TORQUE_ENCODER_TIMEOUT_MS)
+          cut_output(4u);
+      } else if (now-encoder_tick > 100u) cut_output(4u);
+    }
   }
 }
 
@@ -516,24 +600,68 @@ static int32_t local_target(uint32_t elapsed, uint8_t *stage)
 }
 
 /* Sweep into field=0 from opposite electrical sides; hold each for 700ms. */
-static int32_t approach_target(uint32_t elapsed, uint8_t *stage)
+static int32_t approach_target(uint32_t elapsed, uint8_t *stage, uint8_t current_test)
 {
-  if (elapsed < 300u) { *stage=1u; return -45; }
-  if (elapsed < 900u) { *stage=2u; return -45+(int32_t)((elapsed-300u)*45u/600u); }
-  if (elapsed < 1600u) { *stage=3u; return 0; }
-  if (elapsed < 2200u) { *stage=4u; return (int32_t)((elapsed-1600u)*45u/600u); }
-  if (elapsed < 2400u) { *stage=5u; return 45; }
-  if (elapsed < 3000u) { *stage=6u; return 45-(int32_t)((elapsed-2400u)*45u/600u); }
+  uint32_t neg_end = current_test ? CA_NEG_END_MS : 300u;
+  uint32_t zero1_end = current_test ? CA_ZERO1_END_MS : 1600u;
+  uint32_t pos_end = current_test ? CA_POS_END_MS : 2400u;
+  if (elapsed < neg_end) { *stage=1u; return -45; }
+  if (elapsed < neg_end+CA_SWEEP_MS) { *stage=2u; return -45+(int32_t)((elapsed-neg_end)*45u/CA_SWEEP_MS); }
+  if (elapsed < zero1_end) { *stage=3u; return 0; }
+  if (elapsed < zero1_end+CA_SWEEP_MS) { *stage=4u; return (int32_t)((elapsed-zero1_end)*45u/CA_SWEEP_MS); }
+  if (elapsed < pos_end) { *stage=5u; return 45; }
+  if (elapsed < pos_end+CA_SWEEP_MS) { *stage=6u; return 45-(int32_t)((elapsed-pos_end)*45u/CA_SWEEP_MS); }
   *stage=7u; return 0;
+}
+
+uint8_t board_check_torque_active(void)
+{
+  return active_pair == 4u && is_torque(vector_direction);
 }
 
 void board_check_encoder(uint32_t angle, uint8_t ok)
 {
-  if (ok && active_pair == 4u && vector_direction == 10u) {
+  if (ok && active_pair == 4u && is_torque(vector_direction)) {
+    uint32_t primask=__get_PRIMASK();
+    __disable_irq();
+    if (active_pair == 4u) {
+      uint32_t now=HAL_GetTick(), elapsed=now-vector_start;
+      torque.angle=angle;
+      torque.tick=now;
+      if (elapsed >= TORQUE_ALIGN_MS-ALIGN_WINDOW_MS && elapsed < TORQUE_ALIGN_MS) {
+        int32_t pos=(int32_t)angle;
+        if (!torque.align_count || pos<torque.align_min) torque.align_min=pos;
+        if (!torque.align_count || pos>torque.align_max) torque.align_max=pos;
+        torque.align_sum+=pos;
+        torque.align_count++;
+      }
+    }
+    __set_PRIMASK(primask);
+  }
+  if (ok && active_pair == 4u && (vector_direction == 10u || vector_direction == TRACK_APPROACH)) {
     uint32_t elapsed = HAL_GetTick()-vector_start;
-    int32_t index = elapsed >= 1400u && elapsed < 1600u ? 0 :
-        (elapsed >= 3500u && elapsed < 3700u ? 1 : -1);
-    if (index >= 0) {
+    if (vector_direction==TRACK_APPROACH && elapsed>=TRACE_BEGIN_MS && elapsed<TRACE_END_MS) {
+      /* Keep the two currents and their timestamp from the same IRQ update. */
+      uint32_t primask=__get_PRIMASK();
+      __disable_irq();
+      uint32_t capture_ms=HAL_GetTick()-vector_start;
+      uint32_t current_ms=trace_current_ms;
+      int32_t ia=trace_current_a, ib=trace_current_b;
+      __set_PRIMASK(primask);
+      if (capture_ms<TRACE_END_MS && (!trace_n || capture_ms!=trace_pt[trace_n-1u].ms)) {
+        if (trace_n<sizeof(trace_pt)/sizeof(trace_pt[0])) {
+          trace_pt[trace_n].ms=(uint16_t)capture_ms;
+          trace_pt[trace_n].cd=(uint16_t)angle;
+          trace_pt[trace_n].ia_mA=(int16_t)ia;
+          trace_pt[trace_n].ib_mA=(int16_t)ib;
+          trace_pt[trace_n].current_age_ms=(uint16_t)(capture_ms-current_ms);
+          trace_n++;
+        } else trace_overflow=1u;
+      }
+    }
+    int32_t index = vector_direction==TRACK_APPROACH ? approach_window(elapsed) :
+        (elapsed>=1400u && elapsed<1600u ? 0 : (elapsed>=3500u && elapsed<3700u ? 1 : -1));
+    if (index >= 0 && index < 4) {
       if (!approach_count[index]) {
         approach_anchor[index]=angle; approach_first[index]=HAL_GetTick();
       }
@@ -596,6 +724,178 @@ void board_check_encoder(uint32_t angle, uint8_t ok)
   if (!ok && active_pair == 4u) cut_output(4u);
 }
 
+static int32_t bounded(int32_t x, int32_t lo, int32_t hi)
+{
+  return x < lo ? lo : (x > hi ? hi : x);
+}
+
+/* PI in 1/1024 timer ticks. Conditional integration, also bound stored state.
+ * Kp=32/1024 tick/mA, Ki=2/1024 tick/(mA*update). */
+static int32_t track_pi(uint32_t axis, int32_t err, int32_t lo, int32_t hi, uint8_t *limited)
+{
+  int32_t old = track.integral[axis];
+  int32_t trial = old + 2*err, prop = 32*err;
+  if (!((trial+prop > hi*1024 && err > 0) || (trial+prop < lo*1024 && err < 0)))
+    track.integral[axis] = bounded(trial, lo*1024, hi*1024);
+  int32_t out = track.integral[axis] + prop;
+  if (trial+prop >= hi*1024 || trial+prop <= lo*1024) *limited = 1u;
+  return bounded(out, lo*1024, hi*1024)/1024;
+}
+
+/* Inputs are corrected zero-minus-ADC counts. Raw per-sample trip is upstream. */
+static uint8_t read_track_current(int32_t u, int32_t v, int32_t *a, int32_t *b)
+{
+  track.adc_sum[0]+=u;
+  track.adc_sum[1]+=v;
+  if (++track.sub < TRACK_BLOCK) return 0u;
+  *a=track.adc_sum[0]*33000/(4095*(int32_t)TRACK_BLOCK);
+  int32_t phase_v=track.adc_sum[1]*33000/(4095*(int32_t)TRACK_BLOCK);
+  *b=(*a+2*phase_v)*591/1024; /* 1/sqrt(3) */
+  track.sub=0u;
+  track.adc_sum[0]=track.adc_sum[1]=0;
+  return 1u;
+}
+
+static void track_sample(uint32_t elapsed, int32_t u, int32_t v)
+{
+  int32_t a,b;
+  if (!read_track_current(u,v,&a,&b)) return;
+  uint8_t beta_test = vector_direction == TRACK_BETA;
+  uint8_t sweep = vector_direction == TRACK_APPROACH;
+  int32_t da=beta_test ? 0 : TRACK_TARGET_MA, db=beta_test ? TRACK_TARGET_MA : 0;
+  if (sweep) {
+    uint8_t stage;
+    int32_t deg=approach_target(elapsed,&stage,1u), idx=deg<0 ? -deg : deg;
+    da=approach_ref[idx][0]; db=deg<0 ? -approach_ref[idx][1] : approach_ref[idx][1];
+    local_command_deg=deg; local_stage=stage;
+  }
+  if (elapsed >= TRACK_RAMP_MS && a*da+b*db < -60*TRACK_TARGET_MA) {
+    if (++track.wrong_blocks >= 25u) { cut_output(9u); return; }
+  } else track.wrong_blocks = 0u;
+  int32_t ref = elapsed < TRACK_RAMP_MS ? TRACK_TARGET_MA*(int32_t)elapsed/(int32_t)TRACK_RAMP_MS : TRACK_TARGET_MA;
+  uint8_t limited = 0u;
+  int32_t va = track_pi(0u,da*ref/TRACK_TARGET_MA-a,beta_test ? -12 : 0,beta_test ? 12 : 64,&limited);
+  /* Sweep: leave enough room for beta after the alpha PI update so that
+   * |B-C| and |A-B|,|A-C| all remain within the R18 106-tick limit. */
+  int32_t room = sweep ? bounded((106-va-va/2)*1024/887,0,62) : 12;
+  int32_t vb = track_pi(1u,db*ref/TRACK_TARGET_MA-b,beta_test ? 0 : -room,beta_test ? 62 : room,&limited);
+  /* Both rectangles bound line spread to 106 ticks. On beta the largest
+   * difference is B-C: 2*trunc(62*887/1024) = 106. */
+  int32_t side = vb*887/1024;
+  HRTIM1->sTimerxRegs[0].CMP1xR = (uint32_t)(4000-va);
+  HRTIM1->sTimerxRegs[1].CMP1xR = (uint32_t)(4000+va/2-side);
+  HRTIM1->sTimerxRegs[2].CMP1xR = (uint32_t)(4000+va/2+side);
+  if (sweep) {
+    trace_current_a=a;
+    trace_current_b=b;
+    trace_current_ms=elapsed;
+    int32_t i=approach_window(elapsed);
+    if (i>=0) {
+      approach_i[i].n++; approach_i[i].limited+=limited;
+      approach_i[i].sum_a+=a; approach_i[i].sum_b+=b;
+      if (a<da-60 || a>da+60 || b<db-60 || b>db+60) approach_i[i].bad++;
+    }
+    return;
+  }
+  uint32_t align_ms=is_torque(vector_direction) ? TORQUE_ALIGN_MS : ALIGN_TOTAL_MS;
+  if (elapsed >= align_ms-ALIGN_WINDOW_MS) {
+    int32_t m[2] = {a,b};
+    for (uint32_t i=0u;i<2u;i++) {
+      if (!track.n || m[i]<track.lo[i]) track.lo[i]=m[i];
+      if (!track.n || m[i]>track.hi[i]) track.hi[i]=m[i];
+      track.sum[i]+=m[i];
+    }
+    track.n++; track.limited+=limited;
+  }
+}
+
+static void torque_sample(uint32_t elapsed, int32_t u, int32_t v)
+{
+  uint32_t pos=torque.angle;
+  if (elapsed < TORQUE_ALIGN_MS) {
+    int32_t movement=signed_angle_cd((int32_t)pos-(int32_t)angle_start);
+    if (movement < -100 || movement > 100) {
+      cut_output(8u);
+      return;
+    }
+    track_sample(elapsed,u,v);
+    return;
+  }
+
+  if (!torque.aligned) {
+    uint32_t n=torque.align_count, current_n=track.n;
+    int32_t mean_a=current_n ? track.sum[0]/(int32_t)current_n : 0;
+    int32_t mean_b=current_n ? track.sum[1]/(int32_t)current_n : 0;
+    int32_t anchor=n ? torque.align_sum/(int32_t)n : 0;
+    if (n<80u || torque.align_max-torque.align_min>ALIGN_MAX_SPAN_CD ||
+        anchor<TORQUE_START_MIN_CD || anchor>TORQUE_START_MAX_CD ||
+        pos<(uint32_t)(anchor-ALIGN_MAX_SPAN_CD) || pos>(uint32_t)(anchor+ALIGN_MAX_SPAN_CD) ||
+        current_n<190u || current_n>210u || track.limited ||
+        mean_a<170 || mean_a>230 || mean_b< -30 || mean_b>30 ||
+        track.lo[0]<140 || track.hi[0]>260 || track.lo[1]< -60 || track.hi[1]>60) {
+      cut_output(TORQUE_ALIGN_REJECTED);
+      return;
+    }
+    torque.anchor=(uint32_t)anchor;
+    track.sub=0u;
+    track.adc_sum[0]=track.adc_sum[1]=0;
+    track.integral[0]=bounded(track.integral[0],-TORQUE_D_MAX_TICKS*1024,TORQUE_D_MAX_TICKS*1024);
+    track.integral[1]=bounded(track.integral[1],-TORQUE_Q_MAX_TICKS*1024,TORQUE_Q_MAX_TICKS*1024);
+    torque.aligned=1u;
+  }
+
+  int32_t travel=signed_angle_cd((int32_t)pos-(int32_t)torque.anchor);
+  torque.end_travel=travel;
+  if (travel<torque.min_travel) torque.min_travel=travel;
+  if (travel>torque.max_travel) torque.max_travel=travel;
+  if (travel<=-TORQUE_TRAVEL_LIMIT_CD || travel>=TORQUE_TRAVEL_LIMIT_CD) {
+    cut_output(8u);
+    return;
+  }
+  int32_t a,b;
+  if (!read_track_current(u,v,&a,&b)) return;
+
+  /* The travel guard bounds |theta_e| to 21 degrees. Reuse the sine/cosine table. */
+  int32_t theta_e=ALIGN_ENCODER_SIGN*ALIGN_POLE_PAIRS*travel;
+  uint32_t deg=(uint32_t)((theta_e<0 ? -theta_e : theta_e)+50)/100u;
+  int32_t c=approach_ref[deg][0], sn=approach_ref[deg][1];
+  if (theta_e<0) sn=-sn;
+  int32_t id=(c*a+sn*b)/TRACK_TARGET_MA;
+  int32_t iq=(c*b-sn*a)/TRACK_TARGET_MA;
+  int32_t q_target=vector_direction==TORQUE_POSITIVE ? TORQUE_TARGET_MA : -TORQUE_TARGET_MA;
+  uint32_t pulse_ms=elapsed-TORQUE_ALIGN_MS;
+  int32_t ramp_ms=(int32_t)(pulse_ms<TORQUE_RAMP_MS ? pulse_ms : TORQUE_RAMP_MS);
+  int32_t id_ref=TRACK_TARGET_MA*((int32_t)TORQUE_RAMP_MS-ramp_ms)/(int32_t)TORQUE_RAMP_MS;
+  int32_t iq_ref=q_target*ramp_ms/(int32_t)TORQUE_RAMP_MS;
+  if (pulse_ms>=TORQUE_RAMP_MS && (q_target>0 ? iq : -iq)< -40) {
+    if (++track.wrong_blocks>=25u) { cut_output(9u); return; }
+  } else track.wrong_blocks=0u;
+
+  uint8_t limited=0u;
+  int32_t vd=track_pi(0u,id_ref-id,-TORQUE_D_MAX_TICKS,TORQUE_D_MAX_TICKS,&limited);
+  int32_t vq=track_pi(1u,iq_ref-iq,-TORQUE_Q_MAX_TICKS,TORQUE_Q_MAX_TICKS,&limited);
+  /* Inverse Park and Clarke. The d/q bounds keep phase spread below 106 ticks. */
+  int32_t va=(c*vd-sn*vq)/TRACK_TARGET_MA;
+  int32_t vb=(sn*vd+c*vq)/TRACK_TARGET_MA;
+  int32_t side=vb*887/1024;
+  HRTIM1->sTimerxRegs[0].CMP1xR=(uint32_t)(4000-va);
+  HRTIM1->sTimerxRegs[1].CMP1xR=(uint32_t)(4000+va/2-side);
+  HRTIM1->sTimerxRegs[2].CMP1xR=(uint32_t)(4000+va/2+side);
+  /* Compare the first 100 ms at full reference with the final 100 ms. */
+  if (pulse_ms>=TORQUE_RAMP_MS && pulse_ms<TORQUE_RAMP_MS+TORQUE_STATS_MS) {
+    torque.early_count++;
+    torque.early_limited+=limited;
+    torque.early_sum_d+=id;
+    torque.early_sum_q+=iq;
+  }
+  if (pulse_ms>=TORQUE_PULSE_MS-TORQUE_STATS_MS && pulse_ms<TORQUE_PULSE_MS) {
+    torque.count++;
+    torque.limited+=limited;
+    torque.sum_d+=id;
+    torque.sum_q+=iq;
+  }
+}
+
 /* Own this IRQ: never call the legacy FOC HAL callback. No UART in ISR. */
 void board_check_adc_irq(void)
 {
@@ -622,6 +922,8 @@ void board_check_adc_irq(void)
    * CMP1 is the rising edge: all low-side FETs are ON at CMP2=1600.
    * Updates happen after ADC completion, well before CMP1 near 4000. */
   uint32_t elapsed = adc_tick - vector_start;
+  if (is_torque(vector_direction)) { torque_sample(elapsed,-iu,-iv); return; }
+  if (is_track(vector_direction) || vector_direction==TRACK_APPROACH) { track_sample(elapsed, -iu, -iv); return; }
   if ((vector_direction == 8u || vector_direction == 9u || vector_direction == 11u) && elapsed >= 500u) {
     int32_t values[2] = {-iu, -iv}; /* Display convention: zero minus ADC. */
     for (uint32_t i = 0u; i < 2u; i++) {
@@ -644,7 +946,7 @@ void board_check_adc_irq(void)
       local_stage = elapsed < 50u ? 1u : (elapsed < 500u ? 2u : 3u);
     } else if (vector_direction == 7u || vector_direction == 10u) {
       uint8_t stage;
-      int32_t target = vector_direction == 10u ? approach_target(elapsed, &stage) : local_target(elapsed, &stage);
+      int32_t target = vector_direction == 10u ? approach_target(elapsed, &stage,0u) : local_target(elapsed, &stage);
       local_command_deg = target;
       local_stage = stage;
       degree = target < 0 ? (uint32_t)(360+target) : (uint32_t)target;
@@ -725,13 +1027,17 @@ static void configure_adc_trigger(void)
 
 static char vector_label(uint8_t direction)
 {
-  static const char labels[] = "abgjnmlkiyqh";
-  return direction < 12u ? labels[direction] : '?';
+  static const char labels[] = "abgjnmlkiyqho2356";
+  return direction < sizeof(labels)-1u ? labels[direction] : '?';
 }
 
 static void start_vector(uint8_t direction)
 {
   uint32_t now = HAL_GetTick();
+  if (is_torque(direction) && (encoder_angle<TORQUE_START_MIN_CD || encoder_angle>TORQUE_START_MAX_CD)) {
+    send_text("# FOC_REJECTED start_mech_deg=20..22; check s; PWM_OFF\r\n");
+    return;
+  }
   if (direction == 7u && (encoder_angle < 1200u || encoder_angle > 2800u)) {
     send_text("# LOCAL_REJECTED: start mechanical angle must be 12..28deg; recommended 17..22deg; PWM_OFF\r\n");
     return;
@@ -739,7 +1045,7 @@ static void start_vector(uint8_t direction)
   if (active_pair || expired || collecting || !zero_valid || !sample_valid ||
       check_fault || !encoder_valid || now-encoder_tick > 100u ||
       (next_allowed && (int32_t)(now-next_allowed) < 0)) {
-    send_text("# VECTOR_REJECTED: need zero_ok, ADC, encoder, no fault; idle + 2s cooldown\r\n");
+    send_text("# VECTOR_REJECTED: need zero_ok, ADC, encoder, no fault; idle + cooldown (long tests: 5s)\r\n");
     return;
   }
   stop_pwm();
@@ -793,9 +1099,20 @@ static void start_vector(uint8_t direction)
   for (uint32_t i = 0u; i < 2u; i++) {
     current_check_sum[i] = current_check_min[i] = current_check_max[i] = 0;
   }
-  for (uint32_t i=0u;i<2u;i++) {
+  for (uint32_t i=0u;i<4u;i++) {
     approach_count[i]=approach_anchor[i]=approach_first[i]=approach_last[i]=0u;
     approach_sum[i]=approach_min[i]=approach_max[i]=0;
+  }
+  if (is_track(direction) || direction==TRACK_APPROACH || is_torque(direction)) memset(&track, 0, sizeof(track));
+  if (is_torque(direction)) {
+    memset(&torque,0,sizeof(torque));
+    torque.angle=encoder_angle;
+    torque.tick=encoder_tick;
+  }
+  if (direction==TRACK_APPROACH) {
+    memset(approach_i,0,sizeof(approach_i));
+    trace_n=0u; trace_overflow=0u;
+    trace_current_a=trace_current_b=0; trace_current_ms=0u;
   }
   vector_direction = direction;
   if (direction == 11u) map_degree = (uint32_t)map_next_step * 30u;
@@ -813,16 +1130,28 @@ static void start_vector(uint8_t direction)
   local_zero_count[0] = local_zero_count[1] = 0u;
   local_command_deg = -LOCAL_HALF_E_DEG;
   local_stage = 1u;
-  uint32_t duration = direction == 10u ? APPROACH_TOTAL_MS : direction == 7u ? LOCAL_TOTAL_MS : ((direction == 6u || direction >= 8u) ? ALIGN_TOTAL_MS :
+  uint32_t duration = is_torque(direction) ? TORQUE_ALIGN_MS+TORQUE_PULSE_MS : direction == TRACK_APPROACH ? CA_TOTAL_MS : direction == 10u ? APPROACH_TOTAL_MS : direction == 7u ? LOCAL_TOTAL_MS : ((direction == 6u || direction >= 8u) ? ALIGN_TOTAL_MS :
       (direction >= 4u ? IDENT_TOTAL_MS : (direction >= 2u ? SWEEP_MS : VECTOR_MS)));
   deadline = vector_start + duration;
   next_allowed = vector_start + duration + (direction >= 4u ? 5000u : 2000u);
   active_pair = 4u;
   HRTIM1->sCommonRegs.OENR = 0x3Fu;
   __set_PRIMASK(primask);
+  /* Keep UART quiet during drive so encoder polling can meet its deadline. */
+  if (is_torque(direction)) return;
   char line[192];
+  if (direction==TRACK_APPROACH) {
+    send_text("# VECTOR_BEGIN R24 dir=3 CURRENT_APPROACH; -45->0 HOLD700ms ->+45->0 HOLD700ms; 200mA ramp100ms depart_hold700ms total4700ms max_line_ticks=106/8000; x=stop; NOT_SAVED\r\n");
+    return;
+  }
+  if (is_track(direction)) {
+    (void)snprintf(line,sizeof(line),"# VECTOR_BEGIN R24 dir=%c STATOR_CURRENT_PI; target_ab_mA=%d,%d ramp_ms=100 duration_ms=700 max_line_ticks=106/8000; x=stop\r\n",
+        vector_label(direction),direction==TRACK_ALPHA ? TRACK_TARGET_MA : 0,direction==TRACK_BETA ? TRACK_TARGET_MA : 0);
+    send_text(line);
+    return;
+  }
   (void)snprintf(line, sizeof(line),
-      "# VECTOR_BEGIN R16 dir=%c e_start=%ld e_end=%ld TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
+      "# VECTOR_BEGIN R24 dir=%c e_start=%ld e_end=%ld TRG2; duration_ms=%lu; ramp=50ms; max_line_duty=1.5percent (~0.18V at 12V); x=stop\r\n",
       vector_label(direction),
       (long)(direction == 11u ? (int32_t)map_degree : direction == 10u ? -45 : direction == 7u ? -25 : (direction == 5u ? 360 : ((direction == 1u || direction == 3u || direction == 9u) ? 90 : 0))),
       (long)(direction == 11u ? (int32_t)map_degree : direction == 7u ? -25 : (direction == 4u ? 360 : ((direction == 1u || direction == 2u || direction == 9u) ? 90 : 0))),
@@ -982,11 +1311,110 @@ void board_check_init(void)
   MX_ADC1_Init();
   adc_ready = HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) == HAL_OK;
   if (adc_ready == 0u) check_fault = 1u;
-  send_text("# STEP2B_R16 CURRENT_VECTOR_MAP MCU_DT_200NS; PWM OFF at boot\r\n"
+  send_text("# STEP2B_R24_FOC_TEST STATOR_CURRENT_PI MCU_DT_200NS; PWM OFF at boot\r\n"
             "# PA0/PA1 current ADC; 5mOhm x20; nominal VDDA=3.3V\r\n"
-            "# z=zero; f=FireWater; t=text; x=stop; c=clear check_fault; h=one vector map point 0:30:330deg\r\n"
+            "# z=zero; f=FireWater; t=text; x=stop; c=clear fault; o/2=alpha/beta 200mA; 3=current approach; 4=replay trace; 5/6=temp align + Iq +/-100mA; start 20..22deg; 850ms lock + 500ms pulse; h=vector map\r\n"
             "# d=PWM-off diagnosis; a/b=fixed 100ms; g/j=90deg 400ms; n/m=360deg survey 2500ms; l=align700ms; k=local2700ms; q=two-sided-hold3700ms; e=auditOFF; i/y=current-check700ms; u/v/w disabled; current trip ~0.8A\r\n");
   start_zero();
+}
+
+/* Foreground only, after PWM and injected IRQ are disabled. */
+static void report_trace(uint8_t reason)
+{
+  char line[240];
+  if (trace_n<2u) { send_text("# CA_TRACE insufficient_samples\r\n"); return; }
+  uint32_t last=trace_n-1u, peak=1u, maxgap=0, ten=0, ninety=0;
+  uint32_t min_age=trace_pt[0].current_age_ms, max_age=min_age;
+  int32_t net=signed_angle_cd((int32_t)trace_pt[last].cd-trace_pt[0].cd);
+  int32_t sign=net<0 ? -1 : 1, total=net*sign, biggest=0;
+  for (uint32_t i=1u;i<=last;i++) {
+    uint32_t gap=trace_pt[i].ms-trace_pt[i-1u].ms;
+    if (trace_pt[i].current_age_ms < min_age) min_age=trace_pt[i].current_age_ms;
+    if (trace_pt[i].current_age_ms > max_age) max_age=trace_pt[i].current_age_ms;
+    int32_t step=signed_angle_cd((int32_t)trace_pt[i].cd-trace_pt[i-1u].cd);
+    if (gap>maxgap) maxgap=gap;
+    if (i==1u || step*step>biggest*biggest) {peak=i; biggest=step;}
+    int32_t prog=sign*signed_angle_cd((int32_t)trace_pt[i].cd-trace_pt[0].cd);
+    if (!ten && 10*prog>=total) ten=i;
+    if (!ninety && 10*prog>=9*total) ninety=i;
+  }
+  uint8_t complete=reason==1u && !trace_overflow && maxgap<=40u &&
+      trace_pt[0].ms<CA_ZERO1_END_MS && TRACE_END_MS-trace_pt[last].ms<=40u;
+  (void)snprintf(line,sizeof(line),"# CA_TRACE complete=%u n=%lu net_cd=%ld max_step_cd=%ld step_ms=%u..%u max_gap_ms=%lu current_age_ms=%lu..%lu\r\n",
+      complete,(unsigned long)trace_n,(long)net,(long)biggest,trace_pt[peak-1u].ms,trace_pt[peak].ms,(unsigned long)maxgap,
+      (unsigned long)min_age,(unsigned long)max_age);
+  send_text(line);
+  if (complete && total>=50 && ten && ninety>=ten) {
+    /* Bound first-crossing time; if both thresholds cross in one sample,
+     * report 0..sample_interval, never claim instantaneous motion. */
+    unsigned lo=ninety>ten ? (unsigned)(trace_pt[ninety-1u].ms-trace_pt[ten].ms) : 0u;
+    unsigned hi=(unsigned)(trace_pt[ninety].ms-trace_pt[ten-1u].ms);
+    (void)snprintf(line,sizeof(line),"# CA_MOTION first_cross_10_90_ms=%u..%u; positive sweep=2100..2700ms; +45 hold=2700..3400ms\r\n",lo,hi);
+    send_text(line);
+  } else send_text("# CA_MOTION no_duration (incomplete trace or net <0.50deg)\r\n");
+}
+
+/* Replay up to eight timestamped angle/current samples per row. */
+static void dump_trace(void)
+{
+  if (active_pair || expired) { send_text("# CA_POINTS wait for stop\r\n"); return; }
+  if (!trace_n) { send_text("# CA_POINTS no samples retained\r\n"); return; }
+  send_text("# CA_POINTS format=elapsed_ms:mech_cd:Ialpha_mA:Ibeta_mA:current_age_ms; last command 3 capture\r\n");
+  for (uint32_t i=0;i<trace_n;) {
+    char line[300]="# CA_PTS"; size_t n=strlen(line);
+    for (uint32_t j=0u;j<8u && i<trace_n;j++,i++)
+      n+=(size_t)snprintf(line+n,sizeof(line)-n," %u:%u:%d:%d:%u",trace_pt[i].ms,trace_pt[i].cd,
+          (int)trace_pt[i].ia_mA,(int)trace_pt[i].ib_mA,trace_pt[i].current_age_ms);
+    send_text(strcat(line,"\r\n"));
+  }
+}
+
+static void report_current_approach(uint8_t reason)
+{
+  char line[256];
+  int32_t mech[4], field[4];
+  uint8_t all_current=1u, all_mech=1u;
+  for (uint32_t i=0;i<4;i++) {
+    uint32_t n=approach_i[i].n, m=approach_count[i];
+    int32_t expected=i<2 ? 0 : (i==2 ? -45 : 45);
+    int32_t da=approach_ref[i<2 ? 0 : 45][0], db=i<2 ? 0 : (i==2 ? -1 : 1)*approach_ref[45][1];
+    int32_t a=n ? approach_i[i].sum_a/(int32_t)n : 0, b=n ? approach_i[i].sum_b/(int32_t)n : 0;
+    field[i]=n && (a||b) ? (int32_t)(atan2f((float)b,(float)a)*5729.57795f) : 0;
+    int32_t err=signed_angle_cd(field[i]-expected*100);
+    uint32_t width=i<2 ? 200u : 100u;
+    uint8_t current=reason==1u && n>=width-10u && n<=width+10u && !approach_i[i].limited && !approach_i[i].bad &&
+        a>=da-30 && a<=da+30 && b>=db-30 && b<=db+30 && err>=-500 && err<=500;
+    uint32_t span=m ? (uint32_t)(approach_max[i]-approach_min[i]) : 0u;
+    mech[i]=m ? wrap_angle_cd((int32_t)approach_anchor[i]+approach_sum[i]/(int32_t)m) : 0;
+    uint8_t sensed=reason==1u && m>=(i<2 ? 8u : 4u) && approach_last[i]-approach_first[i]>=(i<2 ? 140u:60u) &&
+        vector_start+window_end_ms[i]-approach_last[i]<=60u && span<=ALIGN_MAX_SPAN_CD;
+    all_current &= current; all_mech &= sensed;
+    (void)snprintf(line,sizeof(line),"# CA_%s side=%u cmd_deg=%ld blocks=%lu mean_ab_mA=%ld,%ld field_cd=%ld limit_blocks=%lu bad_blocks=%lu current_ok=%u mech_n=%lu mech_cd=%ld span_cd=%lu stable=%u\r\n",
+        i<2 ? "HOLD":"FROM",(unsigned)(1u+i%2u),(long)expected,(unsigned long)n,(long)a,(long)b,(long)field[i],
+        (unsigned long)approach_i[i].limited,(unsigned long)approach_i[i].bad,current,(unsigned long)m,(long)mech[i],(unsigned long)span,sensed);
+    send_text(line);
+  }
+  /* Early blocks are diagnostic only. Late FROM windows above decide usability. */
+  for (uint32_t side=0;side<2;side++) {
+    uint32_t i=4u+side, n=approach_i[i].n;
+    if (!n) {
+      (void)snprintf(line,sizeof(line),"# CA_EARLY side=%u blocks=0 no_data\r\n",(unsigned)(1u+side));
+    } else {
+      (void)snprintf(line,sizeof(line),"# CA_EARLY side=%u cmd_deg=%d blocks=%lu mean_ab_mA=%ld,%ld limit_blocks=%lu\r\n",
+          (unsigned)(1u+side),side ? 45 : -45,(unsigned long)n,
+          (long)(approach_i[i].sum_a/(int32_t)n),(long)(approach_i[i].sum_b/(int32_t)n),(unsigned long)approach_i[i].limited);
+    }
+    send_text(line);
+  }
+  int32_t move1=signed_angle_cd(mech[0]-mech[2]), move2=signed_angle_cd(mech[1]-mech[3]);
+  int32_t diff=signed_angle_cd(ALIGN_ENCODER_SIGN*ALIGN_POLE_PAIRS*(mech[1]-mech[0]));
+  int32_t field_diff=signed_angle_cd(field[1]-field[0]);
+  uint8_t usable=reason==1u && !check_fault && all_current && all_mech && field_diff>=-500 && field_diff<=500 &&
+      move1 < -ALIGN_MAX_SPAN_CD && move2 > ALIGN_MAX_SPAN_CD;
+  (void)snprintf(line,sizeof(line),"# CA_COMPARE usable=%u all_current_ok=%u all_stable=%u move_mech_cd=%ld,%ld hold_field_diff_cd=%ld stop_diff_e_cd=%ld repeatability_ok=%u limit_e_cd=500; SCREEN_ONLY NOT_SAVED\r\n",
+      usable,all_current,all_mech,(long)move1,(long)move2,(long)field_diff,(long)diff,
+      (unsigned)(usable && diff>=-APPROACH_MAX_DIFF_CD && diff<=APPROACH_MAX_DIFF_CD));
+  send_text(line);
 }
 
 void board_check_poll(void)
@@ -996,12 +1424,54 @@ void board_check_poll(void)
     stop_pwm();
     char line[256];
     (void)snprintf(line, sizeof(line),
-        "# VECTOR_END reason=%u (1=timeout 2=current 3=ADC_stale 4=encoder 8=mech_range); samples=%lu peak_mA=%lu angle_start=%lu.%02lu angle_now=%lu.%02lu dir=%c\r\n",
+        "# VECTOR_END reason=%u (1=timeout 2=current 3=ADC_stale 4=encoder 8=mech_range 9=wrong_sign 10=align_reject); samples=%lu peak_mA=%lu angle_start=%lu.%02lu angle_now=%lu.%02lu dir=%c\r\n",
         reason, (unsigned long)vector_samples, (unsigned long)(peak_counts*33000u/4095u),
         (unsigned long)(angle_start/100u), (unsigned long)(angle_start%100u),
         (unsigned long)(encoder_angle/100u), (unsigned long)(encoder_angle%100u),
         vector_label(vector_direction));
     send_text(line);
+    if (is_torque(vector_direction)) {
+      uint32_t n=torque.align_count, nn=track.n, qn=torque.count;
+      int32_t mean_mech=n ? torque.align_sum/(int32_t)n : 0;
+      int32_t alpha=nn ? track.sum[0]/(int32_t)nn : 0, beta=nn ? track.sum[1]/(int32_t)nn : 0;
+      int32_t id=qn ? torque.sum_d/(int32_t)qn : 0, iq=qn ? torque.sum_q/(int32_t)qn : 0;
+      int32_t target=vector_direction==TORQUE_POSITIVE ? TORQUE_TARGET_MA : -TORQUE_TARGET_MA;
+      (void)snprintf(line,sizeof(line),"# FOC_ALIGN ready=%u mech_cd=%ld span_cd=%ld enc_n=%lu current_ab_mA=%ld,%ld RAM_ONLY\r\n",
+          torque.aligned,(long)mean_mech,(long)(n ? torque.align_max-torque.align_min : 0),(unsigned long)n,(long)alpha,(long)beta);
+      send_text(line);
+      uint32_t early_n=torque.early_count;
+      if (early_n) {
+        (void)snprintf(line,sizeof(line),"# FOC_EARLY pulse_ms=%u..%u mean_dq_mA=%ld,%ld blocks=%lu limit_blocks=%lu\r\n",
+            (unsigned)TORQUE_RAMP_MS,(unsigned)(TORQUE_RAMP_MS+TORQUE_STATS_MS),
+            (long)(torque.early_sum_d/(int32_t)early_n),(long)(torque.early_sum_q/(int32_t)early_n),
+            (unsigned long)early_n,(unsigned long)torque.early_limited);
+        send_text(line);
+      }
+      (void)snprintf(line,sizeof(line),"# FOC_PULSE reason=%u target_dq_mA=0,%ld mean_dq_mA=%ld,%ld final100ms_blocks=%lu limit_blocks=%lu travel_cd=%ld min_cd=%ld max_cd=%ld PWM_OFF\r\n",
+          reason,(long)target,(long)id,(long)iq,(unsigned long)qn,(unsigned long)torque.limited,
+          (long)torque.end_travel,(long)torque.min_travel,(long)torque.max_travel);
+      send_text(line);
+    }
+    if (vector_direction==TRACK_APPROACH) { report_current_approach(reason); report_trace(reason); }
+    if (is_track(vector_direction)) {
+      uint32_t n=track.n;
+      int32_t a=n ? track.sum[0]/(int32_t)n : 0, b=n ? track.sum[1]/(int32_t)n : 0;
+      /* Bench screen, not current gain calibration. Check the range too, so
+       * oscillation cannot pass just because its mean matches the command. */
+      int32_t ref_a=vector_direction==TRACK_ALPHA ? TRACK_TARGET_MA : 0;
+      int32_t ref_b=vector_direction==TRACK_BETA ? TRACK_TARGET_MA : 0;
+      uint8_t ok=reason==1u && n>=190u && n<=210u && a>=ref_a-30 && a<=ref_a+30 && b>=ref_b-30 && b<=ref_b+30 &&
+          track.lo[0]>=ref_a-60 && track.hi[0]<=ref_a+60 && track.lo[1]>=ref_b-60 && track.hi[1]<=ref_b+60 && !track.limited;
+      (void)snprintf(line,sizeof(line),
+          "# TRACK_RESULT screen_ok=%u reason=%u blocks=%lu limit_blocks=%lu target_ab_mA=%ld,%ld mean_ab_mA=%ld,%ld; last200ms PWM_OFF NOT_SAVED\r\n",
+          ok,reason,(unsigned long)n,(unsigned long)track.limited,(long)ref_a,(long)ref_b,(long)a,(long)b);
+      send_text(line);
+      if (n) {
+        (void)snprintf(line,sizeof(line),"# TRACK_RANGE block_1ms_mA alpha=%ld..%ld beta=%ld..%ld; peak_mA in VECTOR_END is per-sample phase peak\r\n",
+            (long)track.lo[0],(long)track.hi[0],(long)track.lo[1],(long)track.hi[1]);
+        send_text(line);
+      }
+    }
     if (vector_direction == 4u || vector_direction == 5u) {
       int32_t travel = ident_travel-ident_base;
       uint32_t magnitude = travel < 0 ? (uint32_t)-travel : (uint32_t)travel;
@@ -1187,8 +1657,8 @@ void board_check_command(uint8_t command)
 {
   switch (command) {
     case '?':
-      send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear-and-zero; h=one current vector point 0:30:330deg\r\n"
-                "# d=PWM-off diagnosis; a/b=fixed 100ms; g/j=90deg 400ms; n/m=360deg survey 2500ms; l=align700ms; k=local2700ms; q=two-sided-hold3700ms; e=auditOFF; i/y=current-check700ms; 2s cooldown; u/v/w disabled\r\n");
+      send_text("# z=zero; f=FireWater; t=text; x=stop; c=clear; o/2=alpha/beta 200mA; 3=current approach; 4=replay trace; 5/6=temp align + Iq +/-100mA; 20..22deg start; h=vector map\r\n"
+                "# Torque 5/6: start at 20..22deg mechanical; align 850ms; pulse 500ms; x=stop. d=PWM-off diagnosis; a/b=fixed; g/j=90deg; n/m=360deg; l/k/q=align; e=audit; i/y=current checks\r\n");
       break;
     case 'x': stop_pwm(); send_text("# STOP all bridge inputs low\r\n"); break;
     case 'z': start_zero(); break;
@@ -1208,6 +1678,12 @@ void board_check_command(uint8_t command)
     case 'y': start_vector(9u); break;
     case 'q': start_vector(10u); break;
     case 'h': start_vector(11u); break;
+    case 'o': start_vector(TRACK_ALPHA); break;
+    case '2': start_vector(TRACK_BETA); break;
+    case '3': start_vector(TRACK_APPROACH); break;
+    case '4': dump_trace(); break;
+    case '5': start_vector(TORQUE_POSITIVE); break;
+    case '6': start_vector(TORQUE_NEGATIVE); break;
     case 'd': diagnose_sync(); break;
     case 'u': case 'v': case 'w': send_text("# DISABLED in STEP2B; a=fixed vector only\r\n"); break;
     case 'c':
